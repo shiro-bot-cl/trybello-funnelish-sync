@@ -1,0 +1,6 @@
+.funnelish_token
+.env
+*.pyc
+__pycache__/
+output/
+csv_imports/
