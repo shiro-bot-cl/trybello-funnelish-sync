@@ -132,8 +132,10 @@ def run_push(date_str: str, response_url: str = None) -> None:
     reply(f"📦 Found *{len(rows)} orders* (${total_value:,.2f}) — pushing to Shopify now...")
 
     # Step 3: Run the push (expects "YES" confirmation via stdin)
+    # Use push_merged_orders.py — pre-merges multi-SKU orders from same customer+day
+    # so the merger app has nothing to do and no duplicate orders are created.
     push_result = subprocess.run(
-        [sys.executable, str(BASE_DIR / "push_orders_to_shopify.py"), str(csv_path)],
+        [sys.executable, str(BASE_DIR / "push_merged_orders.py"), str(csv_path)],
         input="YES\n",
         capture_output=True, text=True, cwd=str(BASE_DIR),
         timeout=300, env=sub_env
