@@ -332,6 +332,8 @@ def find_missing_otos(
                         "email": email,
                         "first_name": customer.get("first_name", ""),
                         "last_name": customer.get("last_name", ""),
+                        "customer_id": customer.get("customer_id", ""),
+                        "phone": customer.get("phone", ""),
                         "funnelish_order_id": order.get("order_id", ""),
                         "funnelish_order_number": order.get("order_number", ""),
                         "funnelish_product_name": product_name,
@@ -341,9 +343,49 @@ def find_missing_otos(
                         "created_at": order.get("created_at", ""),
                         "shopify_sku": variant["sku"],
                         "shopify_price": variant["price"],
+                        # Address fields — populated by enrich_with_addresses()
+                        "shipping_address1": "",
+                        "shipping_address2": "",
+                        "shipping_city": "",
+                        "shipping_state": "",
+                        "shipping_zip": "",
+                        "shipping_country": "",
                     })
 
     return sorted(missing, key=lambda x: x["created_at"])
+
+def enrich_with_addresses(missing: List[Dict], token: str) -> None:
+    """
+    Fetch shipping address for each missing order from Funnelish customer API.
+    Mutates each row in-place, adding shipping_address1/city/state/zip/country/phone.
+    """
+    CUSTOMER_API = "https://customers.v2.api.funnelish.com/api/v1/customers"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    seen: Dict[str, Dict] = {}  # customer_id → address fields
+
+    for row in missing:
+        cid = str(row.get("customer_id", "")).strip()
+        if not cid:
+            continue
+        if cid not in seen:
+            try:
+                req = urllib.request.Request(f"{CUSTOMER_API}/{cid}", headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    c = json.loads(r.read())
+                seen[cid] = {
+                    "shipping_address1": c.get("shipping_address", "") or "",
+                    "shipping_address2": c.get("shipping_address2", "") or "",
+                    "shipping_city":     c.get("shipping_city", "") or "",
+                    "shipping_state":    c.get("shipping_state", "") or "",
+                    "shipping_zip":      c.get("shipping_zip", "") or "",
+                    "shipping_country":  c.get("shipping_country", "US") or "US",
+                    "phone":             c.get("phone", "") or "",
+                }
+            except Exception as e:
+                print(f"  ⚠️  Could not fetch address for customer {cid}: {e}")
+                seen[cid] = {}
+        row.update(seen[cid])
+
 
 # ─── Output: CSV ────────────────────────────────────────────────────────────────
 
@@ -355,11 +397,13 @@ def save_missing_csv(missing: List[Dict], date: datetime) -> str:
     path = os.path.join(output_dir, f"missing_orders_{date_str}.csv")
 
     fieldnames = [
-        "email", "first_name", "last_name",
+        "email", "first_name", "last_name", "customer_id", "phone",
         "funnelish_order_id", "funnelish_order_number",
         "funnelish_product_name", "oto_category", "supply",
         "amount", "created_at",
-        "shopify_sku", "shopify_price"
+        "shopify_sku", "shopify_price",
+        "shipping_address1", "shipping_address2",
+        "shipping_city", "shipping_state", "shipping_zip", "shipping_country",
     ]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -491,11 +535,16 @@ def main():
     if len(missing) > 5:
         print(f"    ... and {len(missing)-5} more")
 
-    # ── Step 6: Save CSV ───────────────────────────────────────────
+    # ── Step 6: Enrich with shipping addresses ─────────────────────
+    print("\n📦 Fetching shipping addresses from Funnelish...")
+    funnelish_token = get_token()
+    enrich_with_addresses(missing, funnelish_token)
+
+    # ── Step 7: Save CSV ───────────────────────────────────────────
     print("\n💾 Saving CSV...")
     csv_path = save_missing_csv(missing, target_date)
 
-    # ── Step 7: Slack notification ─────────────────────────────────
+    # ── Step 8: Slack notification ─────────────────────────────────
     print("\n📢 Sending notification...")
     send_slack_notification(missing, date_str, csv_path, dry_run=args.dry_run)
 
