@@ -31,6 +31,11 @@ SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
 PORT = int(os.getenv("PORT", 8080))
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 SLACK_CHANNEL = os.getenv("SLACK_CHANNEL", "#trybello-cs-alert")
+TOKEN_UPDATE_SECRET = os.getenv("TOKEN_UPDATE_SECRET", "")
+
+# In-memory Funnelish token — updated at startup from env var,
+# can be refreshed without redeploy via POST /set-token
+_funnelish_token: str = os.getenv("FUNNELISH_TOKEN", "")
 
 
 # ─── Slack signature verification ──────────────────────────────────────────────
@@ -77,7 +82,13 @@ def post_to_slack(text: str, channel: str = None) -> None:
 
 def run_push(date_str: str, response_url: str = None) -> None:
     """Run the daily sync + push for the given date."""
+    global _funnelish_token
     csv_path = BASE_DIR / "output" / f"missing_orders_{date_str}.csv"
+
+    # Build subprocess env with current in-memory token
+    sub_env = os.environ.copy()
+    if _funnelish_token:
+        sub_env["FUNNELISH_TOKEN"] = _funnelish_token
 
     def reply(text: str):
         post_to_slack(text)
@@ -97,7 +108,7 @@ def run_push(date_str: str, response_url: str = None) -> None:
     # Step 1: Re-run the sync to get fresh data for this date
     sync_result = subprocess.run(
         [sys.executable, str(BASE_DIR / "daily_sync.py"), date_str, "--dry-run"],
-        capture_output=True, text=True, cwd=str(BASE_DIR)
+        capture_output=True, text=True, cwd=str(BASE_DIR), env=sub_env
     )
 
     if sync_result.returncode != 0:
@@ -125,7 +136,7 @@ def run_push(date_str: str, response_url: str = None) -> None:
         [sys.executable, str(BASE_DIR / "push_orders_to_shopify.py"), str(csv_path)],
         input="YES\n",
         capture_output=True, text=True, cwd=str(BASE_DIR),
-        timeout=300
+        timeout=300, env=sub_env
     )
 
     if push_result.returncode != 0:
@@ -162,9 +173,41 @@ class SlackCommandHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def _handle_set_token(self, body: bytes) -> None:
+        """Update in-memory Funnelish token without redeploy."""
+        global _funnelish_token
+        auth = self.headers.get("Authorization", "")
+        if not TOKEN_UPDATE_SECRET or auth != f"Bearer {TOKEN_UPDATE_SECRET}":
+            self.send_response(401)
+            self.end_headers()
+            self.wfile.write(b"Unauthorized")
+            return
+        try:
+            payload = json.loads(body)
+            new_token = payload.get("token", "").strip()
+            if not new_token:
+                raise ValueError("missing token")
+        except Exception:
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"Bad request")
+            return
+
+        _funnelish_token = new_token
+        print(f"✅ Funnelish token updated in memory.")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"ok": True}).encode())
+
     def do_POST(self):
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length)
+
+        # Token update endpoint — not a Slack request
+        if self.path == "/set-token":
+            self._handle_set_token(body)
+            return
 
         # Build headers dict for verification
         headers = {k: v for k, v in self.headers.items()}
