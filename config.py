@@ -25,6 +25,7 @@ SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 SLACK_CHANNEL = os.getenv("SLACK_CHANNEL", "#trybello-cs-alert")
 SLACK_CS_USER_ID = os.getenv("SLACK_CS_USER_ID", "U0ABB3AV2E8")  # Mubashir Hasan
 GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL", "https://docs.google.com/spreadsheets/d/1ItfhBGTuV8dfsres3j2YE0H7lIutd0brSrW-Uak-f2E/edit")
+APPS_SCRIPT_WEB_APP = os.getenv("APPS_SCRIPT_WEB_APP", "https://script.google.com/macros/s/AKfycbwJfDtSnwvh8E96z6WOvNttc2pBS2r876Qyc0z5E3fVPZCzOYzywKTIGTdcR-QaSCX5/exec")
 GOOGLE_SHEET_ID = "1ItfhBGTuV8dfsres3j2YE0H7lIutd0brSrW-Uak-f2E"
 
 # ─── SKU Mappings ───────────────────────────────────────────────────────────────

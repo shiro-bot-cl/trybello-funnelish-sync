@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from config import (
     SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET, SHOPIFY_SHOP, SHOPIFY_API_VERSION,
     FUNNELISH_ORDERS_API, SLACK_WEBHOOK_URL, SLACK_CHANNEL, SLACK_CS_USER_ID,
-    GOOGLE_SHEET_URL, FUNNELISH_CSV_DIR, OTO_SKU_MAP,
+    GOOGLE_SHEET_URL, APPS_SCRIPT_WEB_APP, FUNNELISH_CSV_DIR, OTO_SKU_MAP,
     OTO_SKU_PREFIX, OTO_PRICE_BY_SUPPLY, OTO_PORCH_PIRATE
 )
 from funnelish_auth import get_token
@@ -415,7 +415,66 @@ def save_missing_csv(missing: List[Dict], date: datetime) -> str:
 
 # ─── Output: Slack ──────────────────────────────────────────────────────────────
 
-def send_slack_notification(missing: List[Dict], date_str: str, csv_path: str, dry_run: bool = False) -> None:
+def write_to_sheet(missing: List[Dict], date_str: str, dry_run: bool = False) -> str:
+    """
+    POST missing orders to the Apps Script web app, which writes them
+    to a new tab named date_str in the Google Sheet.
+    Returns the direct sheet tab URL, or the base sheet URL on failure.
+    """
+    sheet_tab_url = f"{GOOGLE_SHEET_URL}#gid=0"  # fallback
+
+    if dry_run:
+        print("  [DRY RUN] Would write to Google Sheet.")
+        return sheet_tab_url
+
+    if not APPS_SCRIPT_WEB_APP:
+        print("  ⚠️  APPS_SCRIPT_WEB_APP not set. Skipping sheet write.")
+        return sheet_tab_url
+
+    orders_payload = []
+    for o in missing:
+        orders_payload.append({
+            "order_number":          o.get("order_number", ""),
+            "email":                 o.get("email", ""),
+            "first_name":            o.get("first_name", ""),
+            "last_name":             o.get("last_name", ""),
+            "oto_category":          o.get("oto_category", ""),
+            "funnelish_product_name": o.get("funnelish_product_name", ""),
+            "shopify_sku":           o.get("shopify_sku", ""),
+            "shopify_price":         o.get("shopify_price", 0),
+            "status":                "pending",
+        })
+
+    payload = json.dumps({"date": date_str, "orders": orders_payload}).encode()
+    # Google Apps Script POST redirects (302) — must follow redirect as GET
+    class _RedirectAsGet(urllib.request.HTTPRedirectHandler):
+        def http_error_302(self, req, fp, code, msg, headers):
+            new_url = headers.get("Location")
+            return urllib.request.urlopen(urllib.request.Request(new_url, method="GET"), timeout=30)
+        http_error_301 = http_error_302
+
+    opener = urllib.request.build_opener(_RedirectAsGet())
+    req = urllib.request.Request(
+        APPS_SCRIPT_WEB_APP,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        resp = opener.open(req, timeout=30)
+        result = json.loads(resp.read())
+        if result.get("ok"):
+            rows = result.get("rows", len(missing))
+            print(f"  ✅ Google Sheet updated: {rows} rows written to tab '{date_str}'")
+            sheet_tab_url = f"https://docs.google.com/spreadsheets/d/1ItfhBGTuV8dfsres3j2YE0H7lIutd0brSrW-Uak-f2E/edit"
+        else:
+            print(f"  ❌ Sheet write failed: {result.get('error', 'unknown error')}")
+    except Exception as e:
+        print(f"  ❌ Sheet write error: {e}")
+
+    return sheet_tab_url
+
+
+def send_slack_notification(missing: List[Dict], date_str: str, csv_path: str, dry_run: bool = False, sheet_url: str = None) -> None:
     """Send Slack notification with missing orders summary."""
     if not SLACK_WEBHOOK_URL:
         print("  ⚠️  SLACK_WEBHOOK_URL not set. Skipping Slack notification.")
@@ -425,6 +484,8 @@ def send_slack_notification(missing: List[Dict], date_str: str, csv_path: str, d
     if dry_run:
         print("  [DRY RUN] Would send Slack notification.")
         return
+
+    sheet_link = sheet_url or GOOGLE_SHEET_URL
 
     # Group by category
     by_cat: Dict[str, int] = defaultdict(int)
@@ -446,8 +507,8 @@ def send_slack_notification(missing: List[Dict], date_str: str, csv_path: str, d
             f"{tag} Found *{len(missing)} OTO order(s)* missing from Shopify:\n"
             f"{category_lines}\n\n"
             f"💰 Recovery value: *${total_value:,.2f}*\n\n"
-            f"📊 *<{GOOGLE_SHEET_URL}|View full spreadsheet — {date_str}>*\n\n"
-            f"Review the sheet, mark any rows as SKIP if needed, then reply *approved* and I'll push to Shopify."
+            f"📊 *<{sheet_link}|View sheet — {date_str} tab>*\n\n"
+            f"Review the tab, then use `/approve-otos {date_str}` to push to Shopify."
         )
     }
 
@@ -544,9 +605,13 @@ def main():
     print("\n💾 Saving CSV...")
     csv_path = save_missing_csv(missing, target_date)
 
-    # ── Step 8: Slack notification ─────────────────────────────────
+    # ── Step 8: Write to Google Sheet ──────────────────────────────
+    print("\n📊 Writing to Google Sheet...")
+    sheet_url = write_to_sheet(missing, date_str, dry_run=args.dry_run)
+
+    # ── Step 9: Slack notification ─────────────────────────────────
     print("\n📢 Sending notification...")
-    send_slack_notification(missing, date_str, csv_path, dry_run=args.dry_run)
+    send_slack_notification(missing, date_str, csv_path, dry_run=args.dry_run, sheet_url=sheet_url)
 
     print(f"\n✅ Done! Next step: review {csv_path}")
     print(f"   Then run: python3 push_orders_to_shopify.py {csv_path}")
