@@ -50,35 +50,73 @@ def get_token_from_openclaw_browser() -> str:
                     print(f"✅ Found existing Funnelish session at {pg.url}")
                     return token
 
+        # Also check login page tabs (might be stuck on /log-in)
+        for pg in context.pages:
+            if "app.funnelish.com" in pg.url:
+                token = pg.evaluate("() => localStorage.getItem('user-token')")
+                if token:
+                    print(f"✅ Found Funnelish token in tab at {pg.url}")
+                    return token
+
         # No live session — open login page and authenticate
         print("🔄 No active session found — logging in via OpenClaw browser...")
         page = context.new_page()
         page.goto("https://app.funnelish.com/log-in")
-        page.wait_for_load_state("networkidle", timeout=15000)
+        page.wait_for_load_state("domcontentloaded", timeout=20000)
+        time.sleep(2)  # Extra wait for Vue to render
 
-        # Use locator.type() which fires proper keyboard events in the real browser
-        page.locator('input[placeholder="Your email address"]').click()
-        page.locator('input[placeholder="Your email address"]').type(FUNNELISH_EMAIL, delay=60)
-        page.locator('input[placeholder="Your password"]').click()
-        page.locator('input[placeholder="Your password"]').type(FUNNELISH_PASSWORD, delay=60)
+        # Fill email — try multiple placeholder variants
+        email_sel = 'input[placeholder="Your email address"], input[type="email"], input[name="email"]'
+        page.wait_for_selector(email_sel, timeout=15000)
+        page.locator(email_sel).first.click()
+        page.locator(email_sel).first.type(FUNNELISH_EMAIL, delay=60)
 
-        # Wait for button to enable (Vue validation)
-        for _ in range(30):
-            btn = page.query_selector('button:text("Log in to Funnelish")')
-            if btn and btn.is_enabled():
+        # Fill password
+        pw_sel = 'input[type="password"], input[placeholder="Your password"], input[name="password"]'
+        page.locator(pw_sel).first.click()
+        page.locator(pw_sel).first.type(FUNNELISH_PASSWORD, delay=60)
+
+        time.sleep(1)  # Allow Vue validation to fire
+
+        # Try to click login button — try multiple selectors
+        LOGIN_SELECTORS = [
+            'button:text("Log in to Funnelish")',
+            'button:text("Log in")',
+            'button[type="submit"]',
+            'form button',
+        ]
+        btn = None
+        for _ in range(20):  # up to 10s
+            for sel in LOGIN_SELECTORS:
+                try:
+                    b = page.query_selector(sel)
+                    if b and b.is_enabled():
+                        btn = b
+                        break
+                except Exception:
+                    pass
+            if btn:
                 break
             time.sleep(0.5)
 
-        btn = page.query_selector('button:text("Log in to Funnelish")')
-        if not btn or not btn.is_enabled():
-            raise RuntimeError("Login button never enabled — check credentials or page structure")
+        if btn:
+            btn.click()
+        else:
+            # Last resort: press Enter on password field
+            print("⚠️  Login button not found — submitting via Enter key")
+            page.locator(pw_sel).first.press("Enter")
 
-        btn.click()
-        page.wait_for_url("**/select-account", timeout=15000)
-
-        # Select first account
-        page.locator("li").first.click()
-        page.wait_for_url("**/dashboard", timeout=15000)
+        # Wait for post-login redirect (either select-account or dashboard)
+        try:
+            page.wait_for_url("**/select-account", timeout=12000)
+            page.locator("li").first.click()
+            page.wait_for_url("**/dashboard", timeout=12000)
+        except Exception:
+            # Some accounts go straight to dashboard
+            try:
+                page.wait_for_url("**/dashboard", timeout=12000)
+            except Exception:
+                pass
 
         token = page.evaluate("() => localStorage.getItem('user-token')")
         page.close()
