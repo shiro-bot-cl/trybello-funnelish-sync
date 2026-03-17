@@ -51,7 +51,10 @@ def verify_slack_signature(headers: dict, body: bytes) -> bool:
         print("⚠️  SLACK_SIGNING_SECRET not set — skipping verification")
         return True
     timestamp = headers.get("X-Slack-Request-Timestamp", "")
-    if abs(time.time() - float(timestamp)) > 300:
+    try:
+        if not timestamp or abs(time.time() - float(timestamp)) > 300:
+            return False
+    except (ValueError, TypeError):
         return False
     sig_basestring = f"v0:{timestamp}:{body.decode()}".encode()
     expected = "v0=" + hmac.new(
