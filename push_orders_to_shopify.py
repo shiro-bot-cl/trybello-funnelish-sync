@@ -67,7 +67,19 @@ SKU_VARIANT_CACHE: Dict[str, Optional[int]] = {
 
 
 def get_shopify_token() -> str:
-    """Get Shopify access token via client credentials."""
+    """Get Shopify access token.
+    If SHOPIFY_ACCESS_TOKEN env var is set, use it directly.
+    If SHOPIFY_CLIENT_SECRET starts with 'shpss_' or 'shpat_', it IS the access token.
+    Otherwise, exchange client credentials via OAuth.
+    """
+    # Direct token override
+    direct_token = os.getenv("SHOPIFY_ACCESS_TOKEN", "")
+    if direct_token:
+        return direct_token
+    # Only shpat_ / shpca_ are real access tokens — shpss_ is a client secret, must be exchanged
+    if SHOPIFY_CLIENT_SECRET.startswith(("shpat_", "shpca_")):
+        return SHOPIFY_CLIENT_SECRET
+    # OAuth exchange
     data = json.dumps({
         "client_id": SHOPIFY_CLIENT_ID,
         "client_secret": SHOPIFY_CLIENT_SECRET,
@@ -293,7 +305,13 @@ def main():
     if not args.dry_run:
         print(f"\n⚠️  About to create {len(rows)} REAL Shopify orders!")
         print("   This CANNOT be easily undone.")
-        confirm = input("   Type 'YES' to confirm: ")
+        # Allow non-interactive confirmation via env var
+        auto_confirm = os.getenv("SHOPIFY_PUSH_CONFIRM", "").strip().upper()
+        if auto_confirm == "YES":
+            print("   Auto-confirmed via SHOPIFY_PUSH_CONFIRM env var.")
+            confirm = "YES"
+        else:
+            confirm = input("   Type 'YES' to confirm: ")
         if confirm.strip() != "YES":
             print("   Aborted.")
             sys.exit(0)
