@@ -173,21 +173,27 @@ def fetch_shopify_orders(token: str, date_from: datetime, date_to: datetime) -> 
     return orders
 
 
-def build_shopify_lookup(orders: List[Dict]) -> Dict[str, List[str]]:
+def build_shopify_lookup(orders: List[Dict]) -> Dict[str, List[Dict]]:
     """
-    Build lookup: email.lower() → [list of OTO categories found in that email's orders]
+    Build lookup: email.lower() → list of {category, created_at, amount} dicts.
+    Preserves per-order timestamps so downstream code can do date-aware matching.
     """
-    lookup: Dict[str, List[str]] = defaultdict(list)
+    lookup: Dict[str, List[Dict]] = defaultdict(list)
     for order in orders:
         email = (order.get("email") or "").lower().strip()
         if not email:
             continue
+        created_at = order.get("created_at", "")
         for item in order.get("line_items", []):
             sku = item.get("sku", "")
             title = item.get("title", "")
+            price = float(item.get("price", 0) or 0)
             category = classify_shopify_sku(sku, title)
-            if category not in lookup[email]:
-                lookup[email].append(category)
+            lookup[email].append({
+                "category": category,
+                "created_at": created_at,
+                "amount": price,
+            })
     return dict(lookup)
 
 # ─── Funnelish API ──────────────────────────────────────────────────────────────
@@ -303,16 +309,32 @@ def group_funnelish_sessions(orders: List[Dict]) -> Dict[str, Dict]:
     return {k: dict(v) for k, v in sessions.items()}
 
 
+def _within_48h(shopify_created: str, funnelish_created: str) -> bool:
+    """Return True if two ISO-8601 timestamps are within 48 hours of each other."""
+    try:
+        fmt = "%Y-%m-%dT%H:%M:%S"
+        s = datetime.strptime(shopify_created[:19], fmt)
+        f = datetime.strptime(funnelish_created[:19], fmt)
+        return abs((s - f).total_seconds()) < 172800  # 48 hours
+    except Exception:
+        return True  # can't parse → assume it matches (safe default)
+
+
 def find_missing_orders(
     funnelish_sessions: Dict[str, Dict],
-    shopify_lookup: Dict[str, List[str]]
+    shopify_lookup: Dict[str, List[Dict]]
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Find MAIN and OTO orders present in Funnelish but missing from Shopify.
 
-    MAIN check: customer has a MAIN order in Funnelish but no MAIN purchase in Shopify.
-    OTO check: customer has OTO in Funnelish but that OTO category not in Shopify.
-               Only checked for sessions that also have a MAIN order (real customers).
+    MAIN check: customer has a MAIN order in Funnelish but no MAIN purchase in Shopify
+                within 48 h of the Funnelish order timestamp (date-aware).
+    OTO check:  customer has OTO in Funnelish but that OTO category is not found in
+                Shopify within 48 h of the Funnelish OTO timestamp.
+                Only checked for sessions that also have a MAIN order (real customers).
+
+    Using date-aware matching prevents repeat buyers from having an old purchase
+    falsely suppress a genuinely missing order on a later date.
 
     Returns (missing_main, missing_otos) — both sorted by created_at.
     """
@@ -320,39 +342,45 @@ def find_missing_orders(
     missing_otos: List[Dict] = []
 
     for email, categories in funnelish_sessions.items():
-        shopify_categories = shopify_lookup.get(email, [])
+        shopify_entries = shopify_lookup.get(email, [])
         has_funnelish_main = "MAIN" in categories
 
         # ── Check MAIN orders ──────────────────────────────────────
-        if has_funnelish_main and "MAIN" not in shopify_categories:
+        if has_funnelish_main:
             for order in categories["MAIN"]:
-                customer = order.get("customer", {})
-                product_name = order.get("name", "")
-                funnelish_amount = float(order.get("amount", 0) or 0)
-                missing_main.append({
-                    "order_type": "MAIN",
-                    "email": email,
-                    "first_name": customer.get("first_name", ""),
-                    "last_name": customer.get("last_name", ""),
-                    "customer_id": customer.get("customer_id", ""),
-                    "phone": customer.get("phone", ""),
-                    "funnelish_order_id": order.get("order_id", ""),
-                    "funnelish_order_number": order.get("order_number", ""),
-                    "funnelish_product_name": product_name,
-                    "oto_category": "MAIN",
-                    "supply": "",
-                    "amount": funnelish_amount,
-                    "created_at": order.get("created_at", ""),
-                    "shopify_sku": "",
-                    "shopify_price": funnelish_amount,
-                    # Address fields — populated by enrich_with_addresses()
-                    "shipping_address1": "",
-                    "shipping_address2": "",
-                    "shipping_city": "",
-                    "shipping_state": "",
-                    "shipping_zip": "",
-                    "shipping_country": "",
-                })
+                funnelish_ts = order.get("created_at", "")
+                found_in_shopify = any(
+                    e["category"] == "MAIN" and _within_48h(e["created_at"], funnelish_ts)
+                    for e in shopify_entries
+                )
+                if not found_in_shopify:
+                    customer = order.get("customer", {})
+                    product_name = order.get("name", "")
+                    funnelish_amount = float(order.get("amount", 0) or 0)
+                    missing_main.append({
+                        "order_type": "MAIN",
+                        "email": email,
+                        "first_name": customer.get("first_name", ""),
+                        "last_name": customer.get("last_name", ""),
+                        "customer_id": customer.get("customer_id", ""),
+                        "phone": customer.get("phone", ""),
+                        "funnelish_order_id": order.get("order_id", ""),
+                        "funnelish_order_number": order.get("order_number", ""),
+                        "funnelish_product_name": product_name,
+                        "oto_category": "MAIN",
+                        "supply": "",
+                        "amount": funnelish_amount,
+                        "created_at": funnelish_ts,
+                        "shopify_sku": "",
+                        "shopify_price": funnelish_amount,
+                        # Address fields — populated by enrich_with_addresses()
+                        "shipping_address1": "",
+                        "shipping_address2": "",
+                        "shipping_city": "",
+                        "shipping_state": "",
+                        "shipping_zip": "",
+                        "shipping_country": "",
+                    })
 
         # ── Check OTO orders ───────────────────────────────────────
         # Skip orphaned OTO-only sessions (no MAIN = likely test/fraud)
@@ -362,8 +390,13 @@ def find_missing_orders(
         for category, orders in categories.items():
             if category == "MAIN":
                 continue
-            if category not in shopify_categories:
-                for order in orders:
+            for order in orders:
+                funnelish_ts = order.get("created_at", "")
+                found_in_shopify = any(
+                    e["category"] == category and _within_48h(e["created_at"], funnelish_ts)
+                    for e in shopify_entries
+                )
+                if not found_in_shopify:
                     customer = order.get("customer", {})
                     product_name = order.get("name", "")
                     funnelish_amount = float(order.get("amount", 0) or 0)
