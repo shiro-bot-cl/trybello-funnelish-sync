@@ -508,7 +508,8 @@ def send_slack_notification(missing: List[Dict], date_str: str, csv_path: str, d
             f"{category_lines}\n\n"
             f"💰 Recovery value: *${total_value:,.2f}*\n\n"
             f"📊 *<{sheet_link}|View sheet — {date_str} tab>*\n\n"
-            f"Review the tab, then use `/approve-otos {date_str}` to push to Shopify."
+            f"📋 Review the sheet tab, then run the Slack slash command:\n"
+            f">`/approve-otos {date_str}`"
         )
     }
 
