@@ -105,8 +105,33 @@ def post_to_url(url: str, payload: dict) -> None:
 
 # ─── Sync helper: build CSV, return (rows, csv_path) ───────────────────────────
 
-def run_sync(date_str: str) -> tuple:
-    """Run daily_sync for date_str, return (rows_list, csv_path)."""
+def try_refresh_token() -> bool:
+    """Attempt to refresh the Funnelish token via refresh_token.py. Returns True on success."""
+    global _funnelish_token
+    try:
+        print("🔄 Attempting token refresh via refresh_token.py...")
+        result = subprocess.run(
+            [sys.executable, str(BASE_DIR / "refresh_token.py")],
+            capture_output=True, text=True, cwd=str(BASE_DIR), timeout=120,
+        )
+        print(result.stdout[-500:])
+        if result.returncode == 0:
+            # Reload the token file
+            token_file = BASE_DIR / ".funnelish_token"
+            if token_file.exists():
+                _funnelish_token = token_file.read_text().strip()
+                print(f"✅ Token refreshed successfully")
+                return True
+        else:
+            print(f"❌ Token refresh failed: {result.stderr[-300:]}")
+    except Exception as e:
+        print(f"❌ Token refresh exception: {e}")
+    return False
+
+
+def run_sync(date_str: str, retry_on_auth_error: bool = True) -> tuple:
+    """Run daily_sync for date_str, return (rows_list, csv_path).
+    Auto-retries once if auth error detected (token expired)."""
     csv_path = BASE_DIR / "output" / f"missing_orders_{date_str}.csv"
     sub_env = os.environ.copy()
     if _funnelish_token:
@@ -116,6 +141,17 @@ def run_sync(date_str: str) -> tuple:
         [sys.executable, str(BASE_DIR / "daily_sync.py"), date_str, "--dry-run"],
         capture_output=True, text=True, cwd=str(BASE_DIR), env=sub_env,
     )
+
+    # Detect auth error and auto-retry with refreshed token
+    auth_error_signals = ["FunnelishAuthError", "Could not obtain a valid Funnelish token", "401", "invalid token"]
+    output_combined = (result.stdout + result.stderr).lower()
+    is_auth_error = any(sig.lower() in output_combined for sig in auth_error_signals)
+
+    if result.returncode != 0 and is_auth_error and retry_on_auth_error:
+        print("⚠️  Auth error detected — refreshing token and retrying...")
+        if try_refresh_token():
+            return run_sync(date_str, retry_on_auth_error=False)  # Retry once
+
     if result.returncode != 0:
         raise RuntimeError(result.stderr[-500:])
     if not csv_path.exists():

@@ -133,8 +133,9 @@ def save_token_locally(token: str) -> None:
 
 
 def push_token_to_railway(token: str) -> bool:
+    """Push token to the running service via /set-token (fast, in-memory update)."""
     if not TOKEN_UPDATE_SECRET:
-        print("⚠️  TOKEN_UPDATE_SECRET not set — skipping Railway push")
+        print("⚠️  TOKEN_UPDATE_SECRET not set — skipping Railway service push")
         return False
 
     url = f"{RAILWAY_URL}/set-token"
@@ -150,10 +151,56 @@ def push_token_to_railway(token: str) -> bool:
         with urllib.request.urlopen(req, timeout=10) as r:
             resp = json.loads(r.read())
             if resp.get("ok"):
-                print("✅ Token pushed to Railway service successfully")
+                print("✅ Token pushed to Railway service (in-memory) successfully")
                 return True
     except Exception as e:
-        print(f"❌ Failed to push token to Railway: {e}")
+        print(f"❌ Failed to push token to Railway service: {e}")
+    return False
+
+
+def update_railway_env_var(token: str) -> bool:
+    """
+    Persistently update the FUNNELISH_TOKEN env var on Railway via GraphQL API.
+    This survives service restarts — fixes the ephemeral filesystem problem.
+    """
+    RAILWAY_API_TOKEN = os.getenv("RAILWAY_API_TOKEN", "9598b7d4-45f6-4e49-959f-14da2fdb256d")
+    PROJECT_ID = "0e155348-881d-41d5-a0ad-5f302e7a9e0c"
+    ENV_ID = "bfa3c1f1-7fce-4bce-8b9e-4829953dfa70"
+    SERVICE_ID = "ee483ebe-5675-402a-ae99-9357ae1a491b"
+
+    query = """
+    mutation UpsertVar($input: VariableUpsertInput!) {
+      variableUpsert(input: $input)
+    }
+    """
+    variables = {
+        "input": {
+            "projectId": PROJECT_ID,
+            "environmentId": ENV_ID,
+            "serviceId": SERVICE_ID,
+            "name": "FUNNELISH_TOKEN",
+            "value": token
+        }
+    }
+    payload = json.dumps({"query": query, "variables": variables}).encode()
+    req = urllib.request.Request(
+        "https://backboard.railway.app/graphql/v2",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {RAILWAY_API_TOKEN}"
+        }
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            resp = json.loads(r.read())
+            if "errors" not in resp:
+                print("✅ FUNNELISH_TOKEN env var updated on Railway (persistent)")
+                return True
+            else:
+                print(f"❌ Railway API error: {resp['errors']}")
+    except Exception as e:
+        print(f"❌ Failed to update Railway env var: {e}")
     return False
 
 
@@ -165,7 +212,8 @@ def main():
         sys.exit(1)
 
     save_token_locally(token)
-    push_token_to_railway(token)
+    push_token_to_railway(token)       # Fast: in-memory update of running service
+    update_railway_env_var(token)      # Persistent: survives service restarts
 
     # Decode and show expiry
     import base64
