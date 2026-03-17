@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-TryBello Daily Funnelish ↔ Shopify OTO Sync Checker (v4)
-==========================================================
-Finds OTO orders captured in Funnelish that were NOT created in Shopify.
+TryBello Daily Funnelish ↔ Shopify Sync Checker (v5)
+=====================================================
+Finds MAIN and OTO orders captured in Funnelish that were NOT created in Shopify.
 
 Usage:
     python3 daily_sync.py                    # check yesterday
@@ -11,8 +11,11 @@ Usage:
     python3 daily_sync.py --help
 
 Output:
-    missing_orders_YYYY-MM-DD.csv   (always saved)
+    missing_orders_YYYY-MM-DD.csv   (always saved, includes Order Type column)
     Slack notification               (if SLACK_WEBHOOK_URL set)
+
+Changelog:
+    v5 (2026-03-17): Also check MAIN/front-end orders, not just OTOs.
 """
 
 import argparse
@@ -300,35 +303,73 @@ def group_funnelish_sessions(orders: List[Dict]) -> Dict[str, Dict]:
     return {k: dict(v) for k, v in sessions.items()}
 
 
-def find_missing_otos(
+def find_missing_orders(
     funnelish_sessions: Dict[str, Dict],
     shopify_lookup: Dict[str, List[str]]
-) -> List[Dict]:
+) -> Tuple[List[Dict], List[Dict]]:
     """
-    Find OTO orders present in Funnelish but missing from Shopify.
-    Returns list of missing order dicts with enriched info.
+    Find MAIN and OTO orders present in Funnelish but missing from Shopify.
+
+    MAIN check: customer has a MAIN order in Funnelish but no MAIN purchase in Shopify.
+    OTO check: customer has OTO in Funnelish but that OTO category not in Shopify.
+               Only checked for sessions that also have a MAIN order (real customers).
+
+    Returns (missing_main, missing_otos) — both sorted by created_at.
     """
-    missing = []
+    missing_main: List[Dict] = []
+    missing_otos: List[Dict] = []
 
     for email, categories in funnelish_sessions.items():
-        # Only look at sessions that have a MAIN order (real customers)
-        if "MAIN" not in categories:
-            continue
-
         shopify_categories = shopify_lookup.get(email, [])
+        has_funnelish_main = "MAIN" in categories
+
+        # ── Check MAIN orders ──────────────────────────────────────
+        if has_funnelish_main and "MAIN" not in shopify_categories:
+            for order in categories["MAIN"]:
+                customer = order.get("customer", {})
+                product_name = order.get("name", "")
+                funnelish_amount = float(order.get("amount", 0) or 0)
+                missing_main.append({
+                    "order_type": "MAIN",
+                    "email": email,
+                    "first_name": customer.get("first_name", ""),
+                    "last_name": customer.get("last_name", ""),
+                    "customer_id": customer.get("customer_id", ""),
+                    "phone": customer.get("phone", ""),
+                    "funnelish_order_id": order.get("order_id", ""),
+                    "funnelish_order_number": order.get("order_number", ""),
+                    "funnelish_product_name": product_name,
+                    "oto_category": "MAIN",
+                    "supply": "",
+                    "amount": funnelish_amount,
+                    "created_at": order.get("created_at", ""),
+                    "shopify_sku": "",
+                    "shopify_price": funnelish_amount,
+                    # Address fields — populated by enrich_with_addresses()
+                    "shipping_address1": "",
+                    "shipping_address2": "",
+                    "shipping_city": "",
+                    "shipping_state": "",
+                    "shipping_zip": "",
+                    "shipping_country": "",
+                })
+
+        # ── Check OTO orders ───────────────────────────────────────
+        # Skip orphaned OTO-only sessions (no MAIN = likely test/fraud)
+        if not has_funnelish_main:
+            continue
 
         for category, orders in categories.items():
             if category == "MAIN":
                 continue
-            # This customer bought an OTO in Funnelish
             if category not in shopify_categories:
-                # Missing in Shopify!
                 for order in orders:
                     customer = order.get("customer", {})
                     product_name = order.get("name", "")
                     funnelish_amount = float(order.get("amount", 0) or 0)
                     variant = resolve_shopify_variant(product_name, category, funnelish_amount)
-                    missing.append({
+                    missing_otos.append({
+                        "order_type": "OTO",
                         "email": email,
                         "first_name": customer.get("first_name", ""),
                         "last_name": customer.get("last_name", ""),
@@ -352,7 +393,17 @@ def find_missing_otos(
                         "shipping_country": "",
                     })
 
-    return sorted(missing, key=lambda x: x["created_at"])
+    return (
+        sorted(missing_main, key=lambda x: x["created_at"]),
+        sorted(missing_otos, key=lambda x: x["created_at"]),
+    )
+
+
+# Backwards-compat alias kept for any external callers
+def find_missing_otos(funnelish_sessions, shopify_lookup):
+    """Deprecated: use find_missing_orders() instead."""
+    _, otos = find_missing_orders(funnelish_sessions, shopify_lookup)
+    return otos
 
 def enrich_with_addresses(missing: List[Dict], token: str) -> None:
     """
@@ -397,6 +448,7 @@ def save_missing_csv(missing: List[Dict], date: datetime) -> str:
     path = os.path.join(output_dir, f"missing_orders_{date_str}.csv")
 
     fieldnames = [
+        "order_type",  # MAIN or OTO
         "email", "first_name", "last_name", "customer_id", "phone",
         "funnelish_order_id", "funnelish_order_number",
         "funnelish_product_name", "oto_category", "supply",
@@ -434,6 +486,7 @@ def write_to_sheet(missing: List[Dict], date_str: str, dry_run: bool = False) ->
     orders_payload = []
     for o in missing:
         orders_payload.append({
+            "order_type":            o.get("order_type", "OTO"),
             "order_number":          o.get("order_number", ""),
             "email":                 o.get("email", ""),
             "first_name":            o.get("first_name", ""),
@@ -474,8 +527,15 @@ def write_to_sheet(missing: List[Dict], date_str: str, dry_run: bool = False) ->
     return sheet_tab_url
 
 
-def send_slack_notification(missing: List[Dict], date_str: str, csv_path: str, dry_run: bool = False, sheet_url: str = None) -> None:
-    """Send Slack notification with missing orders summary."""
+def send_slack_notification(
+    missing_main: List[Dict],
+    missing_otos: List[Dict],
+    date_str: str,
+    csv_path: str,
+    dry_run: bool = False,
+    sheet_url: str = None,
+) -> None:
+    """Send Slack notification with missing orders summary (MAIN + OTO breakdown)."""
     if not SLACK_WEBHOOK_URL:
         print("  ⚠️  SLACK_WEBHOOK_URL not set. Skipping Slack notification.")
         print("     Set it in .env or environment: export SLACK_WEBHOOK_URL='https://hooks.slack.com/...'")
@@ -486,27 +546,35 @@ def send_slack_notification(missing: List[Dict], date_str: str, csv_path: str, d
         return
 
     sheet_link = sheet_url or GOOGLE_SHEET_URL
+    tag = f"<@{SLACK_CS_USER_ID}>" if SLACK_CS_USER_ID else ""
 
-    # Group by category
+    total_missing = len(missing_main) + len(missing_otos)
+    main_value = sum(float(o.get("shopify_price", 0)) for o in missing_main)
+    oto_value  = sum(float(o.get("shopify_price", 0)) for o in missing_otos)
+    total_value = main_value + oto_value
+
+    # OTO breakdown by category
     by_cat: Dict[str, int] = defaultdict(int)
-    total_value = 0.0
-    for o in missing:
+    for o in missing_otos:
         by_cat[o["oto_category"]] += 1
-        total_value += float(o.get("shopify_price", 0))
-
-    category_lines = "\n".join(
-        f"  • {cat}: {count} order(s)" for cat, count in sorted(by_cat.items())
+    oto_lines = "\n".join(
+        f"      ◦ {cat}: {count}" for cat, count in sorted(by_cat.items())
     )
 
-    tag = f"<@{SLACK_CS_USER_ID}>" if SLACK_CS_USER_ID else ""
+    summary_lines = []
+    summary_lines.append(f"  • Missing MAIN orders: *{len(missing_main)}* — ${main_value:,.2f}")
+    if missing_otos:
+        summary_lines.append(f"  • Missing OTO orders: *{len(missing_otos)}* — ${oto_value:,.2f}")
+        if oto_lines:
+            summary_lines.append(oto_lines)
+    summary_lines.append(f"  • *Total missing: {total_missing} — ${total_value:,.2f}*")
 
     msg = {
         "channel": SLACK_CHANNEL,
         "text": (
-            f":rotating_light: *TryBello OTO Sync Alert — {date_str}*\n\n"
-            f"{tag} Found *{len(missing)} OTO order(s)* missing from Shopify:\n"
-            f"{category_lines}\n\n"
-            f"💰 Recovery value: *${total_value:,.2f}*\n\n"
+            f":rotating_light: *TryBello Sync Alert — {date_str}*\n\n"
+            f"{tag} Found *{total_missing} order(s)* missing from Shopify:\n"
+            + "\n".join(summary_lines) + "\n\n"
             f"📊 *<{sheet_link}|View sheet — {date_str} tab>*\n\n"
             f"📋 Review the sheet tab, then run the Slack slash command:\n"
             f">`/approve-otos {date_str}`"
@@ -570,49 +638,64 @@ def main():
     shopify_lookup = build_shopify_lookup(shopify_orders)
     print(f"  Unique Shopify customer emails: {len(shopify_lookup)}")
 
-    # ── Step 4: Find missing OTOs ──────────────────────────────────
-    print("\n🔎 Running OTO sync check...")
-    missing = find_missing_otos(sessions, shopify_lookup)
+    # ── Step 4: Find missing MAIN + OTO orders ────────────────────
+    print("\n🔎 Running sync check (MAIN + OTO)...")
+    missing_main, missing_otos = find_missing_orders(sessions, shopify_lookup)
+    all_missing = missing_main + missing_otos
 
     # ── Step 5: Report ─────────────────────────────────────────────
     print(f"\n{'='*60}")
-    if not missing:
-        print(f"  ✅ NO MISSING OTO ORDERS for {date_str}. All synced!")
+    if not all_missing:
+        print(f"  ✅ NO MISSING ORDERS for {date_str}. All synced!")
         print(f"{'='*60}\n")
         return
 
-    print(f"  🚨 FOUND {len(missing)} MISSING OTO ORDER(S) for {date_str}:")
-    from collections import Counter
-    cat_counts = Counter(o["oto_category"] for o in missing)
-    for cat, count in sorted(cat_counts.items()):
-        print(f"    • {cat}: {count}")
-    total_value = sum(float(o.get("shopify_price", 0)) for o in missing)
-    print(f"  💰 Estimated recovery value: ${total_value:,.2f}")
-    print(f"{'='*60}\n")
+    main_value = sum(float(o.get("shopify_price", 0)) for o in missing_main)
+    oto_value  = sum(float(o.get("shopify_price", 0)) for o in missing_otos)
+    total_value = main_value + oto_value
 
-    # Show first few
-    print("  Sample missing orders:")
-    for o in missing[:5]:
-        print(f"    - {o['email']} | {o['funnelish_product_name']} | ${o['amount']} | {o['shopify_sku']}")
-    if len(missing) > 5:
-        print(f"    ... and {len(missing)-5} more")
+    print(f"  🚨 FOUND {len(all_missing)} MISSING ORDER(S) for {date_str}:")
+    print(f"    • Missing MAIN orders: {len(missing_main)} — ${main_value:,.2f}")
+    if missing_main:
+        for o in missing_main[:3]:
+            print(f"        - {o['email']} | {o['funnelish_product_name']} | ${o['amount']:.2f}")
+        if len(missing_main) > 3:
+            print(f"        ... and {len(missing_main)-3} more")
+
+    print(f"    • Missing OTO orders:  {len(missing_otos)} — ${oto_value:,.2f}")
+    if missing_otos:
+        from collections import Counter
+        cat_counts = Counter(o["oto_category"] for o in missing_otos)
+        for cat, count in sorted(cat_counts.items()):
+            print(f"        ◦ {cat}: {count}")
+        for o in missing_otos[:3]:
+            print(f"        - {o['email']} | {o['funnelish_product_name']} | ${o['amount']:.2f} | {o['shopify_sku']}")
+        if len(missing_otos) > 3:
+            print(f"        ... and {len(missing_otos)-3} more")
+
+    print(f"    ─────────────────────────────────────────")
+    print(f"    • Total missing: {len(all_missing)} — ${total_value:,.2f}")
+    print(f"{'='*60}\n")
 
     # ── Step 6: Enrich with shipping addresses ─────────────────────
     print("\n📦 Fetching shipping addresses from Funnelish...")
     funnelish_token = get_token()
-    enrich_with_addresses(missing, funnelish_token)
+    enrich_with_addresses(all_missing, funnelish_token)
 
     # ── Step 7: Save CSV ───────────────────────────────────────────
     print("\n💾 Saving CSV...")
-    csv_path = save_missing_csv(missing, target_date)
+    csv_path = save_missing_csv(all_missing, target_date)
 
     # ── Step 8: Write to Google Sheet ──────────────────────────────
     print("\n📊 Writing to Google Sheet...")
-    sheet_url = write_to_sheet(missing, date_str, dry_run=args.dry_run)
+    sheet_url = write_to_sheet(all_missing, date_str, dry_run=args.dry_run)
 
     # ── Step 9: Slack notification ─────────────────────────────────
     print("\n📢 Sending notification...")
-    send_slack_notification(missing, date_str, csv_path, dry_run=args.dry_run, sheet_url=sheet_url)
+    send_slack_notification(
+        missing_main, missing_otos, date_str, csv_path,
+        dry_run=args.dry_run, sheet_url=sheet_url
+    )
 
     print(f"\n✅ Done! Next step: review {csv_path}")
     print(f"   Then run: python3 push_orders_to_shopify.py {csv_path}")
