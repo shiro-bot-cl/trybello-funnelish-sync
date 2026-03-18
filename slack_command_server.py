@@ -380,7 +380,13 @@ class SlackCommandHandler(BaseHTTPRequestHandler):
             return
 
         _funnelish_token = new_token
-        print("✅ Funnelish token updated in memory.")
+        # Also persist to disk so daily_sync.py subprocess always has the latest token
+        token_file = BASE_DIR / ".funnelish_token"
+        try:
+            token_file.write_text(new_token)
+            print(f"✅ Funnelish token updated in memory + written to {token_file}")
+        except Exception as e:
+            print(f"⚠️  Token updated in memory but could not write to disk: {e}")
         self._send_json(200, {"ok": True})
 
     def _handle_slack_action(self, body: bytes) -> None:

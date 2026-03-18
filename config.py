@@ -19,10 +19,16 @@ if _env_file.exists():
 FUNNELISH_EMAIL = os.getenv("FUNNELISH_EMAIL", "")
 FUNNELISH_PASSWORD = os.getenv("FUNNELISH_PASSWORD", "")
 # Session JWT (expires in ~24h). Refresh via: python3 refresh_token.py
-# Or set env var FUNNELISH_TOKEN to override
-FUNNELISH_TOKEN = os.getenv("FUNNELISH_TOKEN", "")
-FUNNELISH_ORDERS_API = "https://customers.v2.api.funnelish.com/api/v1/orders"
+# Token file takes priority over env var (kept fresh by /set-token endpoint)
 FUNNELISH_TOKEN_FILE = os.path.join(os.path.dirname(__file__), ".funnelish_token")
+_token_from_file = ""
+if os.path.exists(FUNNELISH_TOKEN_FILE):
+    try:
+        _token_from_file = open(FUNNELISH_TOKEN_FILE).read().strip()
+    except Exception:
+        pass
+FUNNELISH_TOKEN = _token_from_file or os.getenv("FUNNELISH_TOKEN", "")
+FUNNELISH_ORDERS_API = "https://customers.v2.api.funnelish.com/api/v1/orders"
 
 # ─── Shopify ────────────────────────────────────────────────────────────────────
 SHOPIFY_CLIENT_ID = os.getenv("SHOPIFY_CLIENT_ID", "")
