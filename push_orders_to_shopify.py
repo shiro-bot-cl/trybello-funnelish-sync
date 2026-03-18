@@ -149,7 +149,13 @@ def build_shopify_order(row: Dict, variant_map: Dict[str, int], date_str: str) -
     # Build line item — always use variant_id if available
     variant_id = variant_map.get(sku)
     if variant_id:
-        line_item = {"variant_id": variant_id, "quantity": 1}
+        # Always pass exact Funnelish price — never let Shopify use variant price or apply tax
+        line_item = {
+            "variant_id": variant_id,
+            "quantity": 1,
+            "price": price,
+            "tax_lines": [],  # Suppress tax — customer already paid exact amount via Funnelish
+        }
     else:
         # Fallback: custom line item with SKU (fulfillment will require manual intervention)
         sku_info = OTO_SKU_MAP.get(row.get("oto_category", ""), {})
@@ -160,6 +166,7 @@ def build_shopify_order(row: Dict, variant_map: Dict[str, int], date_str: str) -
             "price": price,
             "quantity": 1,
             "requires_shipping": True,
+            "tax_lines": [],  # Suppress tax — customer already paid exact amount via Funnelish
         }
         print(f"  ⚠️  No variant_id for SKU {sku} — using custom line item")
 
@@ -177,6 +184,8 @@ def build_shopify_order(row: Dict, variant_map: Dict[str, int], date_str: str) -
         "fulfillment_status": None,
         "send_receipt": False,
         "send_fulfillment_receipt": False,
+        "taxes_included": True,   # Taxes already included in Funnelish price — do not recalculate
+        "shipping_lines": [],     # No shipping charges — customer already paid via Funnelish
         "line_items": [line_item],
         "tags": f"funnelish-recovery,{date_str}",
         "note": f"Recovered from Funnelish sync failure — original Funnelish order ID: {funnelish_id} (order #{funnelish_num})",
