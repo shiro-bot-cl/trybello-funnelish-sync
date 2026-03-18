@@ -141,10 +141,14 @@ def run_sync(date_str: str, retry_on_auth_error: bool = True) -> tuple:
     if _funnelish_token:
         sub_env["FUNNELISH_TOKEN"] = _funnelish_token
 
-    result = subprocess.run(
-        [sys.executable, str(BASE_DIR / "daily_sync.py"), date_str, "--no-slack"],
-        capture_output=True, text=True, cwd=str(BASE_DIR), env=sub_env,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(BASE_DIR / "daily_sync.py"), date_str, "--no-slack"],
+            capture_output=True, text=True, cwd=str(BASE_DIR), env=sub_env,
+            timeout=300,  # 5-minute hard limit
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Sync timed out after 5 minutes for {date_str}. Check Railway logs.")
 
     # Detect auth error and auto-retry with refreshed token
     auth_error_signals = ["FunnelishAuthError", "Could not obtain a valid Funnelish token", "401", "invalid token"]
@@ -283,7 +287,9 @@ def run_preview(date_str: str, response_url: str, user_name: str) -> None:
     try:
         rows, csv_path = run_sync(date_str)
     except RuntimeError as e:
-        reply_url(f"❌ Sync failed for {date_str}:\n```{e}```")
+        msg = f"❌ Sync failed for {date_str}:\n```{str(e)[:400]}```"
+        reply_url(msg)
+        post_to_slack(msg)  # Also post to channel so it's always visible
         return
 
     if not rows:
