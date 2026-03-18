@@ -18,6 +18,7 @@ Environment:
 import csv
 import hashlib
 import hmac
+import io
 import json
 import os
 import subprocess
@@ -156,13 +157,61 @@ def run_sync(date_str: str, retry_on_auth_error: bool = True) -> tuple:
             return run_sync(date_str, retry_on_auth_error=False)  # Retry once
 
     if result.returncode != 0:
+        # Before giving up, try reading pre-synced data from Google Sheet
+        print("  ⚠️  Sync failed — trying Google Sheet fallback...")
+        sheet_rows = read_orders_from_sheet(date_str)
+        if sheet_rows:
+            # Write to CSV so push_merged_orders.py can use it
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            fieldnames = list(sheet_rows[0].keys())
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(sheet_rows)
+            print(f"  ✅ Wrote {len(sheet_rows)} rows from Sheet to {csv_path}")
+            return sheet_rows, csv_path
         raise RuntimeError(result.stderr[-500:])
     if not csv_path.exists():
+        # Sync succeeded but no CSV (e.g. 0 missing orders)
+        sheet_rows = read_orders_from_sheet(date_str)
+        if sheet_rows:
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            fieldnames = list(sheet_rows[0].keys())
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(sheet_rows)
+            return sheet_rows, csv_path
         return [], csv_path
 
     with open(csv_path) as f:
         rows = list(csv.DictReader(f))
     return rows, csv_path
+
+
+# ─── Google Sheet fallback reader ───────────────────────────────────────────────
+
+APPS_SCRIPT_WEB_APP = os.getenv(
+    "APPS_SCRIPT_WEB_APP",
+    "https://script.google.com/macros/s/AKfycbwJfDtSnwvh8E96z6WOvNttc2pBS2r876Qyc0z5E3fVPZCzOYzywKTIGTdcR-QaSCX5/exec"
+)
+
+def read_orders_from_sheet(date_str: str) -> list:
+    """Read already-synced orders from the Google Sheet tab for date_str.
+    Returns list of row dicts (same format as CSV), or [] if tab not found."""
+    try:
+        url = f"{APPS_SCRIPT_WEB_APP}?action=read&date={date_str}"
+        req = urllib.request.Request(url, headers={"User-Agent": "ShiroBot/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+        if isinstance(data, list) and data:
+            print(f"  📊 Read {len(data)} rows from Google Sheet tab {date_str}")
+            return data
+        print(f"  ℹ️  Google Sheet tab {date_str} is empty or not found.")
+        return []
+    except Exception as e:
+        print(f"  ⚠️  Google Sheet read failed: {e}")
+        return []
 
 
 # ─── Push runner ────────────────────────────────────────────────────────────────
