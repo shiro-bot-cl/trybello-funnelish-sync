@@ -283,6 +283,7 @@ def run_preview(date_str: str, response_url: str, user_name: str) -> None:
         post_to_url(response_url, {"text": text, "response_type": "in_channel"})
 
     reply_url(f"⏳ <@{user_name}> requested OTO sync for *{date_str}* — fetching data...")
+    post_to_slack(f"🔄 [DEBUG] Starting sync subprocess for {date_str}...")
 
     try:
         rows, csv_path = run_sync(date_str)
@@ -292,9 +293,13 @@ def run_preview(date_str: str, response_url: str, user_name: str) -> None:
         post_to_slack(msg)  # Also post to channel so it's always visible
         return
 
+    post_to_slack(f"🔄 [DEBUG] Sync subprocess complete — {len(rows)} rows, csv_exists={csv_path.exists() if csv_path else False}")
+
     if not rows:
         reply_url(f"✅ No missing OTO orders found for *{date_str}* — nothing to push.")
         return
+
+    post_to_slack(f"🔄 [DEBUG] Building Block Kit preview for {len(rows)} rows...")
 
     total_value = sum(float(r.get("shopify_price", 0)) for r in rows)
     sku_counts = Counter(r.get("shopify_sku", "unknown") for r in rows)
