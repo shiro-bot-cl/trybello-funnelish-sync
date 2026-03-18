@@ -19,6 +19,15 @@ import time
 import urllib.request
 from pathlib import Path
 
+# Auto-load .env from project root
+_env_file = Path(__file__).parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
+
 BASE_DIR = Path(__file__).parent
 TOKEN_FILE = BASE_DIR / ".funnelish_token"
 
