@@ -54,15 +54,26 @@ SKU_VARIANT_CACHE: Dict[str, Optional[int]] = {
     "HC-GR-05": 51282358731062,
     "HC-GR-06": 52023497326902,
     "HC-GR-09": 51727025471798,
-    # Booster
+    # Booster (HB-GR-03 = "Daily Hair Booster 3-Month Supply" — confirmed by Serge 2026-03-18)
     "HB-GR-01": 51507428983094,
     "HB-GR-02": 52023564763446,
-    "HB-GR-03": 51819958075702,
+    "HB-GR-03": 50203049820470,   # FIX: was 51819958075702 (5-Month Supply) — correct is 3-Month Supply
     "HB-GR-04": 50203254751542,
     "HB-GR-06": 50203077017910,
     "HB-GR-09": 50203086717238,
     # Porch Pirate
     "PPP-01":   52762993492278,
+    # Hair Helper Spray MAIN (HH-NF) — SKU matching only, any active variant is fine for fulfillment
+    # Using "Bello Hair Helper Spray" as the canonical product (confirmed by Serge 2026-03-18)
+    "HH-NF-01": 50627653534006,
+    "HH-NF-02": 52183227498806,
+    "HH-NF-03": 52183227531574,
+    "HH-NF-04": 50627653566774,   # Bello Hair Helper Spray 4-month @ $99.97
+    "HH-NF-05": 51982740193590,
+    "HH-NF-06": 50781778968886,
+    "HH-NF-07": 51982740783414,
+    "HH-NF-08": 51982741504310,
+    "HH-NF-09": 49466450641206,
 }
 
 
@@ -96,9 +107,19 @@ def get_shopify_token() -> str:
 
 def lookup_variants(token: str) -> Dict[str, int]:
     """
-    Scan Shopify products to find variant IDs matching our SKUs.
+    Return variant IDs for our known SKUs.
+    ALWAYS uses SKU_VARIANT_CACHE (hardcoded canonical IDs) — never live lookup.
+    Duplicate SKUs in Shopify make live lookup non-deterministic and dangerous.
+    To update a variant ID: edit SKU_VARIANT_CACHE directly (confirmed by Serge).
     Returns: {sku: variant_id}
     """
+    print("  Using hardcoded SKU_VARIANT_CACHE (no live lookup — prevents duplicate SKU issues)")
+    variant_map = dict(SKU_VARIANT_CACHE)
+    for sku, vid in variant_map.items():
+        print(f"  Found: {sku} → variant_id {vid}")
+    return variant_map
+
+    # ── LEGACY live lookup (disabled — duplicate SKUs cause wrong product selection) ──
     variant_map: Dict[str, int] = {}
     target_skus = set(SKU_VARIANT_CACHE.keys())
     page_info = None

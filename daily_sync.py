@@ -77,6 +77,23 @@ def classify_shopify_sku(sku: str, title: str) -> str:
 
 # ─── Variant Resolver ──────────────────────────────────────────────────────────
 
+def _resolve_main_sku(product_name: str) -> str:
+    """
+    Resolve Shopify SKU for MAIN (front-end) Funnelish orders from the product name.
+    The current main funnel product is the Hair Helper Spray (HH-NF).
+    SKU suffix = number of bottles/months (01=1, 03=3, 04=4, 06=6, etc.)
+    Rule: SKU matching only — price is not critical, fulfillment is.
+    """
+    name = (product_name or "").lower()
+    # Detect supply size from name (e.g. "Buy 4 Months Supply", "6-month", "3 Bottles")
+    for months, suffix in [("9", "09"), ("8", "08"), ("7", "07"), ("6", "06"),
+                            ("5", "05"), ("4", "04"), ("3", "03"), ("2", "02"), ("1", "01")]:
+        if f"{months} month" in name or f"{months}-month" in name or f"{months} bottle" in name:
+            return f"HH-NF-{suffix}"
+    # Default: 4-month (most common main funnel product)
+    return "HH-NF-04"
+
+
 def resolve_shopify_variant(product_name: str, oto_category: str, funnelish_amount: float) -> Dict:
     """
     Determine the correct Shopify SKU and price from the Funnelish product name.
@@ -357,6 +374,8 @@ def find_missing_orders(
                     customer = order.get("customer", {})
                     product_name = order.get("name", "")
                     funnelish_amount = float(order.get("amount", 0) or 0)
+                    # Resolve SKU for MAIN order from product name (SKU matching, not price matching)
+                    main_sku = _resolve_main_sku(product_name)
                     missing_main.append({
                         "order_type": "MAIN",
                         "email": email,
@@ -371,7 +390,7 @@ def find_missing_orders(
                         "supply": "",
                         "amount": funnelish_amount,
                         "created_at": funnelish_ts,
-                        "shopify_sku": "",
+                        "shopify_sku": main_sku,
                         "shopify_price": funnelish_amount,
                         # Address fields — populated by enrich_with_addresses()
                         "shipping_address1": "",
