@@ -520,7 +520,7 @@ def write_to_sheet(missing: List[Dict], date_str: str, dry_run: bool = False) ->
     for o in missing:
         orders_payload.append({
             "order_type":            o.get("order_type", "OTO"),
-            "order_number":          o.get("order_number", ""),
+            "order_number":          o.get("funnelish_order_number", "") or o.get("funnelish_order_id", ""),
             "email":                 o.get("email", ""),
             "first_name":            o.get("first_name", ""),
             "last_name":             o.get("last_name", ""),

@@ -135,8 +135,26 @@ def try_refresh_token() -> bool:
 
 def run_sync(date_str: str, retry_on_auth_error: bool = True) -> tuple:
     """Run daily_sync for date_str, return (rows_list, csv_path).
-    Auto-retries once if auth error detected (token expired)."""
+    First tries Google Sheet (pre-populated by 7 AM local sync).
+    Falls back to running daily_sync.py subprocess if Sheet is empty."""
     csv_path = BASE_DIR / "output" / f"missing_orders_{date_str}.csv"
+
+    # ── Sheet-first strategy: local 7 AM sync already wrote data ──
+    sheet_rows = read_orders_from_sheet(date_str)
+    if sheet_rows:
+        print(f"  ✅ Got {len(sheet_rows)} rows from Google Sheet — skipping subprocess")
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        import csv as csv_mod
+        if sheet_rows:
+            fieldnames = list(sheet_rows[0].keys())
+            with open(csv_path, "w", newline="") as f:
+                writer = csv_mod.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(sheet_rows)
+        return sheet_rows, csv_path
+
+    # ── Fallback: run daily_sync.py subprocess (needs valid token) ──
+    print(f"  ℹ️  Sheet empty for {date_str} — running subprocess...")
     sub_env = os.environ.copy()
     if _funnelish_token:
         sub_env["FUNNELISH_TOKEN"] = _funnelish_token
@@ -202,16 +220,21 @@ APPS_SCRIPT_WEB_APP = os.getenv(
 
 def read_orders_from_sheet(date_str: str) -> list:
     """Read already-synced orders from the Google Sheet tab for date_str.
+    Uses POST to avoid redirect stripping query params.
     Returns list of row dicts (same format as CSV), or [] if tab not found."""
     try:
-        url = f"{APPS_SCRIPT_WEB_APP}?action=read&date={date_str}"
-        req = urllib.request.Request(url, headers={"User-Agent": "ShiroBot/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        payload = json.dumps({"action": "read", "date": date_str}).encode()
+        req = urllib.request.Request(
+            APPS_SCRIPT_WEB_APP,
+            data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "ShiroBot/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
         if isinstance(data, list) and data:
             print(f"  📊 Read {len(data)} rows from Google Sheet tab {date_str}")
             return data
-        print(f"  ℹ️  Google Sheet tab {date_str} is empty or not found.")
+        print(f"  ℹ️  Google Sheet tab {date_str} is empty or not found. Response: {str(data)[:200]}")
         return []
     except Exception as e:
         print(f"  ⚠️  Google Sheet read failed: {e}")
