@@ -280,7 +280,8 @@ def run_preview(date_str: str, response_url: str, user_name: str) -> None:
     from collections import Counter
 
     def reply_url(text: str):
-        post_to_url(response_url, {"text": text, "response_type": "in_channel"})
+        if response_url:
+            post_to_url(response_url, {"text": text, "response_type": "in_channel"})
 
     reply_url(f"⏳ <@{user_name}> requested OTO sync for *{date_str}* — fetching data...")
     post_to_slack(f"🔄 [DEBUG] Starting sync subprocess for {date_str}...")
@@ -360,6 +361,29 @@ class SlackCommandHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
+        elif self.path.startswith("/debug-preview"):
+            # Protected test endpoint: trigger preview flow without Slack signing
+            from urllib.parse import urlparse, parse_qs
+            auth = self.headers.get("Authorization", "")
+            if not TOKEN_UPDATE_SECRET or auth != f"Bearer {TOKEN_UPDATE_SECRET}":
+                self.send_response(401)
+                self.end_headers()
+                self.wfile.write(b"Unauthorized")
+                return
+            qs = parse_qs(urlparse(self.path).query)
+            date_str = qs.get("date", [None])[0]
+            if not date_str:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"Missing ?date=YYYY-MM-DD")
+                return
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(f"Running preview for {date_str} — check Slack".encode())
+            # Fire in background thread (same as real slash command)
+            import threading
+            t = threading.Thread(target=run_preview, args=(date_str, None, "shirobot-debug"), daemon=True)
+            t.start()
         else:
             self.send_response(404)
             self.end_headers()
