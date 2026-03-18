@@ -142,7 +142,7 @@ def run_sync(date_str: str, retry_on_auth_error: bool = True) -> tuple:
         sub_env["FUNNELISH_TOKEN"] = _funnelish_token
 
     result = subprocess.run(
-        [sys.executable, str(BASE_DIR / "daily_sync.py"), date_str, "--dry-run"],
+        [sys.executable, str(BASE_DIR / "daily_sync.py"), date_str, "--no-slack"],
         capture_output=True, text=True, cwd=str(BASE_DIR), env=sub_env,
     )
 

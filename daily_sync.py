@@ -627,7 +627,8 @@ def send_slack_notification(
 def main():
     parser = argparse.ArgumentParser(description="TryBello Funnelish-Shopify OTO sync checker")
     parser.add_argument("date", nargs="?", help="Date to check (YYYY-MM-DD). Default: yesterday.")
-    parser.add_argument("--dry-run", action="store_true", help="Don't send Slack notifications.")
+    parser.add_argument("--dry-run", action="store_true", help="Don't write CSV or send Slack notifications.")
+    parser.add_argument("--no-slack", action="store_true", help="Write CSV + Sheet but skip Slack notification (used by approval flow).")
     parser.add_argument("--csv-fallback", action="store_true", help="Use CSV input instead of API.")
     parser.add_argument("--no-funnelish", action="store_true", help="Skip Funnelish fetch (use cached CSV).")
     args = parser.parse_args()
@@ -724,10 +725,11 @@ def main():
     sheet_url = write_to_sheet(all_missing, date_str, dry_run=args.dry_run)
 
     # ── Step 9: Slack notification ─────────────────────────────────
+    skip_slack = args.dry_run or args.no_slack
     print("\n📢 Sending notification...")
     send_slack_notification(
         missing_main, missing_otos, date_str, csv_path,
-        dry_run=args.dry_run, sheet_url=sheet_url
+        dry_run=skip_slack, sheet_url=sheet_url
     )
 
     print(f"\n✅ Done! Next step: review {csv_path}")
