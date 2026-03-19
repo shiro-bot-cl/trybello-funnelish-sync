@@ -197,7 +197,8 @@ def update_railway_env_var(token: str) -> bool:
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {RAILWAY_API_TOKEN}"
+            "Authorization": f"Bearer {RAILWAY_API_TOKEN}",
+            "User-Agent": "Mozilla/5.0 (compatible; railway-client/1.0)"
         }
     )
     try:
