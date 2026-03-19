@@ -540,13 +540,22 @@ def write_to_sheet(missing: List[Dict], date_str: str, dry_run: bool = False) ->
         orders_payload.append({
             "order_type":            o.get("order_type", "OTO"),
             "order_number":          o.get("funnelish_order_number", "") or o.get("funnelish_order_id", ""),
+            "funnelish_order_id":    o.get("funnelish_order_id", ""),
             "email":                 o.get("email", ""),
             "first_name":            o.get("first_name", ""),
             "last_name":             o.get("last_name", ""),
+            "phone":                 o.get("phone", ""),
             "oto_category":          o.get("oto_category", ""),
             "funnelish_product_name": o.get("funnelish_product_name", ""),
             "shopify_sku":           o.get("shopify_sku", ""),
             "shopify_price":         o.get("shopify_price", 0),
+            # Shipping address — REQUIRED for fulfillment
+            "shipping_address1":     o.get("shipping_address1", ""),
+            "shipping_address2":     o.get("shipping_address2", ""),
+            "shipping_city":         o.get("shipping_city", ""),
+            "shipping_state":        o.get("shipping_state", ""),
+            "shipping_zip":          o.get("shipping_zip", ""),
+            "shipping_country":      o.get("shipping_country", "US"),
             "status":                "pending",
         })
 
