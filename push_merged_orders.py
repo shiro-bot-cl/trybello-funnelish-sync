@@ -94,7 +94,7 @@ def group_rows(rows: List[Dict]) -> Dict[Tuple, List[Dict]]:
     return dict(groups)
 
 
-def build_merged_order(rows: List[Dict], date_str: str) -> Dict:
+def build_merged_order(rows: List[Dict], date_str: str, shopify_token: str = "") -> Dict:
     """Build a single Shopify order with multiple line items."""
     ref = rows[0]  # use first row for customer info
     email = ref["email"].strip()
@@ -132,6 +132,8 @@ def build_merged_order(rows: List[Dict], date_str: str) -> Dict:
         "fulfillment_status": None,
         "send_receipt": False,
         "send_fulfillment_receipt": False,
+        "taxes_included": True,   # Customer already paid exact amount via Funnelish
+        "shipping_lines": [],     # No shipping charges
         "line_items": line_items,
         "tags": f"funnelish-recovery,{date_str}",
         "note": note,
@@ -163,7 +165,39 @@ def build_merged_order(rows: List[Dict], date_str: str) -> Dict:
             "phone": phone,
         }
     else:
-        print(f"  ⚠️  No shipping address for {email}")
+        # ── FALLBACK: look up from Shopify customer's existing orders ──
+        print(f"  ⚠️  No address in CSV for {email} — looking up from Shopify...")
+        if shopify_token:
+            import urllib.parse as _up
+            shop = os.getenv("SHOPIFY_SHOP", "trybello.myshopify.com")
+            url = (f"https://{shop}/admin/api/2024-01/orders.json"
+                   f"?email={_up.quote(email)}&status=any&limit=10")
+            req = urllib.request.Request(url, headers={"X-Shopify-Access-Token": shopify_token})
+            try:
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    prev_orders = json.loads(r.read()).get("orders", [])
+                for po in prev_orders:
+                    sa = po.get("shipping_address") or {}
+                    if sa.get("address1") and sa.get("city"):
+                        order["shipping_address"] = {
+                            "first_name": first_name,
+                            "last_name": last_name,
+                            "address1": sa.get("address1", ""),
+                            "address2": sa.get("address2", "") or "",
+                            "city":     sa.get("city", ""),
+                            "province": sa.get("province", ""),
+                            "zip":      sa.get("zip", ""),
+                            "country":  sa.get("country", "US") or "US",
+                            "phone":    sa.get("phone", "") or phone,
+                        }
+                        print(f"  ✅  Got address from Shopify: {sa.get('address1')}, {sa.get('city')}")
+                        break
+                else:
+                    print(f"  ❌  No address found in Shopify for {email}")
+            except Exception as e:
+                print(f"  ❌  Shopify address lookup failed for {email}: {e}")
+        else:
+            print(f"  ❌  No shopify_token — cannot look up address for {email}")
 
     return order
 
@@ -215,7 +249,7 @@ def main():
     total_value = 0.0
 
     for i, ((email, date_str), order_rows) in enumerate(groups.items(), 1):
-        order_payload = build_merged_order(order_rows, date_str)
+        order_payload = build_merged_order(order_rows, date_str, shopify_token=token or "")
         skus = [r["shopify_sku"] for r in order_rows]
         value = sum(float(r.get("shopify_price") or r.get("amount") or 0) for r in order_rows)
 

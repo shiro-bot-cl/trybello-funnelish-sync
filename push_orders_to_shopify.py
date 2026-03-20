@@ -105,6 +105,38 @@ def get_shopify_token() -> str:
         return json.loads(resp.read())["access_token"]
 
 
+def _lookup_shopify_address(email: str, token: str) -> Optional[Dict]:
+    """
+    Look up a customer's shipping address from their existing Shopify orders.
+    Returns a dict with address1/city/province/zip/country/phone, or None.
+    This is the guaranteed fallback when Funnelish customer API returns no address.
+    """
+    if not email or not token:
+        return None
+    shop = os.getenv("SHOPIFY_SHOP", "trybello.myshopify.com")
+    url = (f"https://{shop}/admin/api/2024-01/orders.json"
+           f"?email={urllib.parse.quote(email)}&status=any&limit=10")
+    req = urllib.request.Request(url, headers={"X-Shopify-Access-Token": token})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            orders = json.loads(r.read()).get("orders", [])
+        for o in orders:
+            sa = o.get("shipping_address") or {}
+            if sa.get("address1") and sa.get("city"):
+                return {
+                    "address1": sa.get("address1", ""),
+                    "address2": sa.get("address2", "") or "",
+                    "city":     sa.get("city", ""),
+                    "province": sa.get("province", ""),
+                    "zip":      sa.get("zip", ""),
+                    "country":  sa.get("country", "US") or "US",
+                    "phone":    sa.get("phone", "") or "",
+                }
+    except Exception as e:
+        print(f"  ⚠️  Shopify address lookup error for {email}: {e}")
+    return None
+
+
 def lookup_variants(token: str) -> Dict[str, int]:
     """
     Return variant IDs for our known SKUs.
@@ -161,7 +193,7 @@ def lookup_variants(token: str) -> Dict[str, int]:
     return variant_map
 
 
-def build_shopify_order(row: Dict, variant_map: Dict[str, int], date_str: str) -> Dict:
+def build_shopify_order(row: Dict, variant_map: Dict[str, int], date_str: str, shopify_token: str = "") -> Dict:
     """Build Shopify order payload from a missing-orders CSV row."""
     # Use the SKU recorded in the CSV (already resolved to correct supply size)
     sku = row.get("shopify_sku", "UNKNOWN")
@@ -240,7 +272,18 @@ def build_shopify_order(row: Dict, variant_map: Dict[str, int], date_str: str) -
             "phone": phone,
         }
     else:
-        print(f"  ⚠️  No shipping address for {email} — order will need manual address")
+        # ── FALLBACK: look up address from customer's existing Shopify orders ──
+        print(f"  ⚠️  No address in CSV for {email} — looking up from Shopify...")
+        fallback = _lookup_shopify_address(email, shopify_token)
+        if fallback:
+            order["shipping_address"] = {
+                "first_name": first_name,
+                "last_name": last_name,
+                **fallback,
+            }
+            print(f"  ✅  Found address from Shopify: {fallback.get('address1')}, {fallback.get('city')}")
+        else:
+            print(f"  ❌  No shipping address found for {email} — order will need manual address")
 
     return order
 
@@ -354,7 +397,7 @@ def main():
 
     for i, row in enumerate(rows):
         try:
-            order_payload = build_shopify_order(row, variant_map, date_str)
+            order_payload = build_shopify_order(row, variant_map, date_str, shopify_token=token)
             created = create_shopify_order(token, order_payload, dry_run=args.dry_run)
             order_id = created.get("id", "?")
             order_name = created.get("name", "?")
