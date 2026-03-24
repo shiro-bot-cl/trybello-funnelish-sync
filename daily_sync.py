@@ -366,8 +366,13 @@ def find_missing_orders(
         if has_funnelish_main:
             for order in categories["MAIN"]:
                 funnelish_ts = order.get("created_at", "")
+                # v5 fix: check for ANY Shopify order within 48h window.
+                # Previously checked category=="MAIN" only, but the main funnel product
+                # changed over time (HS-GR in early March → HH-NF later), so HS-GR orders
+                # were classified as OTO1_Shampoo and never matched. Any Funnelish-sourced
+                # order within the window means the main purchase synced.
                 found_in_shopify = any(
-                    e["category"] == "MAIN" and _within_48h(e["created_at"], funnelish_ts)
+                    _within_48h(e["created_at"], funnelish_ts)
                     for e in shopify_entries
                 )
                 if not found_in_shopify:
