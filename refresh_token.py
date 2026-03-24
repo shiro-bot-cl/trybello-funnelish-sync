@@ -46,8 +46,48 @@ def get_token_from_openclaw_browser() -> str:
     from config import FUNNELISH_EMAIL, FUNNELISH_PASSWORD
 
     with sync_playwright() as p:
-        browser = p.chromium.connect_over_cdp(OPENCLAW_CDP)
-        context = browser.contexts[0]
+        # Try CDP first; fall back to headless Chromium if offline
+        try:
+            browser = p.chromium.connect_over_cdp(OPENCLAW_CDP)
+            context = browser.contexts[0]
+            print("✅ Connected via CDP")
+        except Exception as cdp_err:
+            print(f"⚠️  CDP unavailable ({cdp_err}) — launching headless Chromium")
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context()
+            # Skip existing-session checks — go straight to login below
+            page = context.new_page()
+            page.goto("https://app.funnelish.com/log-in")
+            page.wait_for_load_state("domcontentloaded", timeout=20000)
+            time.sleep(3)
+            email_sel = 'input[placeholder="Your email address"], input[type="email"], input[name="email"]'
+            page.wait_for_selector(email_sel, timeout=15000)
+            page.locator(email_sel).first.click()
+            page.locator(email_sel).first.type(FUNNELISH_EMAIL, delay=50)
+            time.sleep(0.5)
+            pass_sel = 'input[type="password"]'
+            page.wait_for_selector(pass_sel, timeout=10000)
+            page.locator(pass_sel).first.click()
+            page.locator(pass_sel).first.type(FUNNELISH_PASSWORD, delay=50)
+            time.sleep(1)
+            # Press Enter to submit (button may be disabled until Vue validates)
+            page.locator(pass_sel).first.press("Enter")
+            # Handle select-account intermediate step
+            try:
+                page.wait_for_url("**/select-account**", timeout=15000)
+                print("📋 On select-account page — clicking first account...")
+                page.locator("li").first.click()
+                page.wait_for_url("**/dashboard**", timeout=15000)
+            except Exception:
+                # Some accounts skip select-account and go straight to dashboard
+                try:
+                    page.wait_for_url("**/dashboard**", timeout=15000)
+                except Exception:
+                    pass
+            time.sleep(2)
+            token = page.evaluate("() => localStorage.getItem('user-token')")
+            browser.close()
+            return token
 
         # Look for an existing logged-in Funnelish page
         funnelish_page = None
