@@ -126,12 +126,19 @@ def get_token_from_openclaw_browser() -> str:
             try:
                 page.wait_for_url("**/select-account**", timeout=15000)
                 print("📋 On select-account page — clicking first account...")
-                page.locator("li").first.click()
-                page.wait_for_url("**/dashboard**", timeout=15000)
+                time.sleep(2)
+                page.locator("div.account_div").first.click()
+                page.wait_for_function(
+                    "() => !window.location.pathname.includes('select-account') && !window.location.pathname.includes('log-in')",
+                    timeout=15000
+                )
             except Exception:
-                # Some accounts skip select-account and go straight to dashboard
+                # Some accounts skip select-account and go straight to root/dashboard
                 try:
-                    page.wait_for_url("**/dashboard**", timeout=15000)
+                    page.wait_for_function(
+                        "() => !window.location.pathname.includes('log-in')",
+                        timeout=15000
+                    )
                 except Exception:
                     pass
             time.sleep(2)
@@ -207,16 +214,25 @@ def get_token_from_openclaw_browser() -> str:
 
         # Wait for post-login redirect (either select-account or dashboard)
         try:
-            page.wait_for_url("**/select-account", timeout=12000)
-            page.locator("li").first.click()
-            page.wait_for_url("**/dashboard", timeout=12000)
+            page.wait_for_url("**/select-account**", timeout=12000)
+            time.sleep(2)
+            # Use confirmed selector (div.account_div)
+            page.locator("div.account_div").first.click()
+            page.wait_for_function(
+                "() => !window.location.pathname.includes('select-account') && !window.location.pathname.includes('log-in')",
+                timeout=15000
+            )
         except Exception:
-            # Some accounts go straight to dashboard
+            # Some accounts go straight to root/dashboard
             try:
-                page.wait_for_url("**/dashboard", timeout=12000)
+                page.wait_for_function(
+                    "() => !window.location.pathname.includes('log-in')",
+                    timeout=12000
+                )
             except Exception:
                 pass
 
+        time.sleep(2)
         token = page.evaluate("() => localStorage.getItem('user-token')")
         page.close()
 

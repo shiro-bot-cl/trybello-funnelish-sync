@@ -68,6 +68,36 @@ def save_token(token: str) -> None:
     os.chmod(FUNNELISH_TOKEN_FILE, 0o600)
 
 
+def refresh_token_via_raw_cdp(cdp_url: str = "http://127.0.0.1:18800") -> str:
+    """
+    Extract token from existing Funnelish tab via raw CDP websocket.
+    Fast (~2s), no Playwright needed. Returns token or raises RuntimeError.
+    """
+    import asyncio
+    try:
+        import websockets
+    except ImportError:
+        raise RuntimeError("websockets not installed")
+
+    async def _fetch():
+        resp = urllib.request.urlopen(f"{cdp_url}/json", timeout=4)
+        pages = json.loads(resp.read())
+        for pg in pages:
+            url = pg.get("url", "")
+            if "app.funnelish.com" in url and "blob:" not in url:
+                ws_url = pg["webSocketDebuggerUrl"]
+                async with websockets.connect(ws_url) as ws:
+                    await ws.send(json.dumps({
+                        "id": 1, "method": "Runtime.evaluate",
+                        "params": {"expression": "localStorage.getItem('user-token')", "returnByValue": True}
+                    }))
+                    result = json.loads(await asyncio.wait_for(ws.recv(), timeout=8))
+                    return result.get("result", {}).get("result", {}).get("value")
+        raise RuntimeError("No Funnelish tab found in CDP browser")
+
+    return asyncio.run(_fetch())
+
+
 def refresh_token_via_playwright() -> str:
     """
     Use Playwright to log in and capture the JWT token.
@@ -87,11 +117,17 @@ def refresh_token_via_playwright() -> str:
         page.goto("https://app.funnelish.com/log-in")
         page.fill('input[placeholder="Your email address"]', FUNNELISH_EMAIL)
         page.fill('input[placeholder="Your password"]', FUNNELISH_PASSWORD)
-        page.click('button:text("Log in")')
-        page.wait_for_url("**/select-account", timeout=10000)
-        # Select first account
-        page.click('li')
-        page.wait_for_url("**/dashboard", timeout=10000)
+        page.press('input[placeholder="Your password"]', "Enter")
+        page.wait_for_url("**/select-account**", timeout=12000)
+        time.sleep(2)
+        # Click first account card (selector confirmed via screenshot)
+        page.locator("div.account_div").first.click()
+        # Wait for any post-login page (root or dashboard)
+        page.wait_for_function(
+            "() => !window.location.pathname.includes('select-account') && !window.location.pathname.includes('log-in')",
+            timeout=15000
+        )
+        time.sleep(2)
         token = page.evaluate("() => localStorage.getItem('user-token')")
         browser.close()
         return token
@@ -114,7 +150,18 @@ def get_token(force_refresh: bool = False) -> str:
         if stored:
             return stored
 
-    # 3. Try Playwright refresh
+    # 3. Try raw CDP (fast, no Playwright)
+    print("🔄 Refreshing Funnelish token via raw CDP...")
+    try:
+        token = refresh_token_via_raw_cdp()
+        if token and is_token_valid(token):
+            save_token(token)
+            print("✅ Token refreshed via CDP.")
+            return token
+    except Exception as e:
+        print(f"⚠️  Raw CDP refresh failed: {e}")
+
+    # 4. Try Playwright refresh (login flow, slower)
     print("🔄 Refreshing Funnelish token via Playwright...")
     try:
         token = refresh_token_via_playwright()
@@ -125,6 +172,8 @@ def get_token(force_refresh: bool = False) -> str:
     except Exception as e:
         print(f"⚠️  Playwright refresh failed: {e}")
 
+    # All strategies exhausted — send Telegram alert before raising
+    _send_auth_failure_alert()
     raise FunnelishAuthError(
         "Could not obtain a valid Funnelish token.\n"
         "To fix:\n"
@@ -133,6 +182,33 @@ def get_token(force_refresh: bool = False) -> str:
         f"  3. Save the token: echo '<TOKEN>' > {FUNNELISH_TOKEN_FILE}\n"
         "  OR set the FUNNELISH_TOKEN environment variable."
     )
+
+
+def _send_auth_failure_alert():
+    """Send a Telegram alert when all token refresh strategies fail."""
+    try:
+        TELEGRAM_BOT_TOKEN = "8778092230:AAGyJTsadxsgz8CRa-HXe_gofW9isk2NzJw"
+        TELEGRAM_CHAT_ID = "341129660"
+        msg = (
+            "⚠️ *Funnelish token refresh failed* — all strategies exhausted.\n"
+            "CDP unavailable, Playwright login failed.\n"
+            "Nightly sync will NOT run. Manual token refresh needed:\n"
+            "`cd ~/Projects/funnelish-sync && python3 refresh_token.py`"
+        )
+        data = json.dumps({
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": msg,
+            "parse_mode": "Markdown"
+        }).encode()
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        urllib.request.urlopen(req, timeout=8)
+    except Exception:
+        pass  # Don't let alert failure mask the real error
 
 
 if __name__ == "__main__":
