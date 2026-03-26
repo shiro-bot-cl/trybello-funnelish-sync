@@ -36,21 +36,71 @@ TOKEN_UPDATE_SECRET = os.getenv("TOKEN_UPDATE_SECRET", "")
 OPENCLAW_CDP = "http://127.0.0.1:18800"
 
 
+def _get_token_via_raw_cdp() -> str:
+    """
+    Extract token from existing Funnelish tab using raw CDP websocket.
+    No Playwright needed — avoids the connect_over_cdp handshake timeout.
+    """
+    import asyncio
+    try:
+        import websockets
+    except ImportError:
+        raise RuntimeError("websockets not installed: pip install websockets")
+
+    async def _fetch():
+        resp = urllib.request.urlopen(f"{OPENCLAW_CDP}/json", timeout=5)
+        pages = json.loads(resp.read())
+        for pg in pages:
+            url = pg.get("url", "")
+            if "app.funnelish.com" in url and "blob:" not in url:
+                ws_url = pg["webSocketDebuggerUrl"]
+                print(f"✅ Found Funnelish tab: {url}")
+                async with websockets.connect(ws_url) as ws:
+                    cmd = json.dumps({
+                        "id": 1,
+                        "method": "Runtime.evaluate",
+                        "params": {"expression": "localStorage.getItem('user-token')", "returnByValue": True}
+                    })
+                    await ws.send(cmd)
+                    result = json.loads(await asyncio.wait_for(ws.recv(), timeout=8))
+                    return result.get("result", {}).get("result", {}).get("value")
+        return None
+
+    return asyncio.run(_fetch())
+
+
 def get_token_from_openclaw_browser() -> str:
     """
     Connect to OpenClaw's browser via CDP (port 18800).
-    Try to find an existing Funnelish session first.
-    If none, open a new page and log in.
+    Try to find an existing Funnelish session first using raw websocket CDP.
+    If none, fall back to Playwright login flow.
     """
-    from playwright.sync_api import sync_playwright
     from config import FUNNELISH_EMAIL, FUNNELISH_PASSWORD
+
+    # --- Strategy 1: raw websocket CDP (fast, no Playwright overhead) ---
+    try:
+        resp = urllib.request.urlopen(f"{OPENCLAW_CDP}/json", timeout=3)
+        pages = json.loads(resp.read())
+        funnelish_pages = [p for p in pages if "app.funnelish.com" in p.get("url","") and "blob:" not in p.get("url","")]
+        if funnelish_pages:
+            token = _get_token_via_raw_cdp()
+            if token:
+                print("✅ Connected via CDP (raw websocket)")
+                return token
+        else:
+            print("⚠️  No Funnelish tab open in CDP browser")
+    except Exception as e:
+        print(f"⚠️  Raw CDP failed: {e}")
+
+    # --- Strategy 2: Playwright (login flow) ---
+    from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
         # Try CDP first; fall back to headless Chromium if offline
         try:
-            browser = p.chromium.connect_over_cdp(OPENCLAW_CDP)
+            browser = p.chromium.connect_over_cdp(OPENCLAW_CDP, timeout=8000)
             context = browser.contexts[0]
-            print("✅ Connected via CDP")
+            print("✅ Connected via CDP (Playwright)")
         except Exception as cdp_err:
             print(f"⚠️  CDP unavailable ({cdp_err}) — launching headless Chromium")
             browser = p.chromium.launch(headless=True)
