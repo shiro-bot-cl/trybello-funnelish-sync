@@ -68,10 +68,14 @@ def save_token(token: str) -> None:
     os.chmod(FUNNELISH_TOKEN_FILE, 0o600)
 
 
+FUNNELISH_REQUIRED_ACCOUNT_ID = 77440  # "mark" account — main FB funnels
+
+
 def refresh_token_via_raw_cdp(cdp_url: str = "http://127.0.0.1:18800") -> str:
     """
     Extract token from existing Funnelish tab via raw CDP websocket.
     Fast (~2s), no Playwright needed. Returns token or raises RuntimeError.
+    Only accepts tokens for account_id=77440 (mark) — rejects Trybello (5245).
     """
     import asyncio
     try:
@@ -92,15 +96,37 @@ def refresh_token_via_raw_cdp(cdp_url: str = "http://127.0.0.1:18800") -> str:
                         "params": {"expression": "localStorage.getItem('user-token')", "returnByValue": True}
                     }))
                     result = json.loads(await asyncio.wait_for(ws.recv(), timeout=8))
-                    return result.get("result", {}).get("result", {}).get("value")
+                    token = result.get("result", {}).get("result", {}).get("value")
+                    if token:
+                        # Verify it's the correct account before accepting
+                        account_id = _get_account_id_from_token(token)
+                        if account_id != FUNNELISH_REQUIRED_ACCOUNT_ID:
+                            raise RuntimeError(
+                                f"CDP tab has wrong Funnelish account (id={account_id}). "
+                                f"Need account {FUNNELISH_REQUIRED_ACCOUNT_ID} (mark). "
+                                "Falling back to Playwright login."
+                            )
+                    return token
         raise RuntimeError("No Funnelish tab found in CDP browser")
 
     return asyncio.run(_fetch())
 
 
+def _get_account_id_from_token(token: str) -> int:
+    """Extract account_id from JWT payload."""
+    try:
+        parts = token.split(".")
+        payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload))
+        return data.get("account_id", 0)
+    except Exception:
+        return 0
+
+
 def refresh_token_via_playwright() -> str:
     """
     Use Playwright to log in and capture the JWT token.
+    Always selects the "mark" account (id=77440) — the main FB funnels account.
     Requires: pip install playwright && playwright install chromium
     """
     try:
@@ -120,8 +146,18 @@ def refresh_token_via_playwright() -> str:
         page.press('input[placeholder="Your password"]', "Enter")
         page.wait_for_url("**/select-account**", timeout=12000)
         time.sleep(2)
-        # Click first account card (selector confirmed via screenshot)
-        page.locator("div.account_div").first.click()
+        # Always select the "mark" account (id=77440) — main FB funnels account.
+        # "Trybello" (id=5245) is the Google funnels account — do NOT use for nightly sync.
+        cards = page.locator("div.account_div").all()
+        target = None
+        for card in cards:
+            if "mark" in card.text_content().strip().lower():
+                target = card
+                break
+        if target is None:
+            # Fallback: use last card (mark was at index 1 when confirmed)
+            target = page.locator("div.account_div").last
+        target.click()
         # Wait for any post-login page (root or dashboard)
         page.wait_for_function(
             "() => !window.location.pathname.includes('select-account') && !window.location.pathname.includes('log-in')",
