@@ -642,8 +642,8 @@ def send_slack_notification(
             f"{tag} Found *{total_missing} order(s)* missing from Shopify:\n"
             + "\n".join(summary_lines) + "\n\n"
             f"📊 *<{sheet_link}|View sheet — {date_str} tab>*\n\n"
-            f"📋 Review the sheet tab, then run the Slack slash command:\n"
-            f">`/approve-otos {date_str}`"
+            f"⚡ Orders are being *automatically pushed to Shopify* now.\n"
+            f"Please review the sheet and flag any issues."
         )
     }
 
