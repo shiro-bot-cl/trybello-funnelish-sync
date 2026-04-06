@@ -110,6 +110,30 @@ def get_token_from_openclaw_browser() -> str:
             page.goto("https://app.funnelish.com/log-in")
             page.wait_for_load_state("domcontentloaded", timeout=20000)
             time.sleep(3)
+            current_url = page.url
+            print(f"📍 Landed on: {current_url}")
+
+            # If already past login (stale cookie session), handle directly
+            if "select-account" in current_url:
+                print("📋 Already on select-account — clicking first account...")
+                time.sleep(2)
+                page.locator("div.account_div").first.click()
+                page.wait_for_function(
+                    "() => !window.location.pathname.includes('select-account') && !window.location.pathname.includes('log-in')",
+                    timeout=15000
+                )
+                time.sleep(2)
+                token = page.evaluate("() => localStorage.getItem('user-token')")
+                browser.close()
+                return token
+            elif "log-in" not in current_url:
+                # Already logged in to some page
+                print(f"✅ Already logged in at {current_url}")
+                token = page.evaluate("() => localStorage.getItem('user-token')")
+                browser.close()
+                return token
+
+            # Fill login form
             email_sel = 'input[placeholder="Your email address"], input[type="email"], input[name="email"]'
             page.wait_for_selector(email_sel, timeout=15000)
             page.locator(email_sel).first.click()
