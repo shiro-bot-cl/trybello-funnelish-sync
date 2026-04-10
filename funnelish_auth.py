@@ -146,23 +146,73 @@ def refresh_token_via_playwright() -> str:
         page.press('input[placeholder="Your password"]', "Enter")
         page.wait_for_url("**/select-account**", timeout=12000)
         time.sleep(2)
-        # Always select the "mark" account (id=77440) — main FB funnels account.
-        # "Trybello" (id=5245) is the Google funnels account — do NOT use for nightly sync.
-        cards = page.locator("div.account_div").all()
+        # Always select the "mark" account (id=77440) — main FB funnels (get.trybello.com).
+        # "Trybello" (id=5245) is the Google funnels account (shop.trybello.com) — do NOT use for nightly sync.
+        # NOTE: Funnelish v2 changed the UI — "div.account_div" no longer exists.
+        # Use the API-based account switch approach: POST to switch-account endpoint after login.
+        # Strategy: look for any clickable element containing "mark" text, trying multiple selectors.
         target = None
-        for card in cards:
-            if "mark" in card.text_content().strip().lower():
-                target = card
-                break
+        # Try v2 selectors (text-based search across common card containers)
+        for selector in [
+            "div.account_div",
+            "[class*='account']",
+            "[class*='workspace']",
+            "[class*='Account']",
+            "button",
+            "div[role='button']",
+        ]:
+            try:
+                elements = page.locator(selector).all()
+                for el in elements:
+                    txt = el.text_content() or ""
+                    if "mark" in txt.strip().lower() and len(txt.strip()) < 50:
+                        target = el
+                        break
+                if target:
+                    break
+            except Exception:
+                continue
+
         if target is None:
-            # Fallback: use last card (mark was at index 1 when confirmed)
-            target = page.locator("div.account_div").last
-        target.click()
+            # Last resort: use JS to click the element containing "mark" text
+            clicked = page.evaluate("""
+                () => {
+                    const all = document.querySelectorAll('*');
+                    for (const el of all) {
+                        if (el.children.length === 0 && el.textContent.trim().toLowerCase() === 'mark') {
+                            el.closest('button, div[role="button"], div[tabindex], li, a') 
+                                ? el.closest('button, div[role="button"], div[tabindex], li, a').click()
+                                : el.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            """)
+            if not clicked:
+                raise FunnelishAuthError(
+                    "Could not find 'mark' account selector on Funnelish select-account page. "
+                    "UI may have changed. Manual token refresh needed."
+                )
+        else:
+            target.click()
+
         # Wait for any post-login page (root or dashboard)
         page.wait_for_function(
             "() => !window.location.pathname.includes('select-account') && !window.location.pathname.includes('log-in')",
             timeout=15000
         )
+        time.sleep(1)
+        # Verify we got the right account token
+        token_check = page.evaluate("() => localStorage.getItem('user-token')")
+        if token_check:
+            account_id = _get_account_id_from_token(token_check)
+            if account_id != FUNNELISH_REQUIRED_ACCOUNT_ID:
+                raise FunnelishAuthError(
+                    f"Playwright selected wrong account (id={account_id}). "
+                    f"Need {FUNNELISH_REQUIRED_ACCOUNT_ID} (mark/get.trybello.com). "
+                    "Manual token refresh needed."
+                )
         time.sleep(2)
         token = page.evaluate("() => localStorage.getItem('user-token')")
         browser.close()
