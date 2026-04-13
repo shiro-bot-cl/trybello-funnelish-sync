@@ -265,6 +265,33 @@ def get_token_from_openclaw_browser() -> str:
         return token
 
 
+REQUIRED_ACCOUNT_ID = 77440  # mark / get.trybello.com (main FB funnels)
+
+
+def _get_account_id_from_token(token: str) -> int:
+    """Extract account_id from JWT payload without verifying signature."""
+    import base64
+    try:
+        parts = token.split(".")
+        payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload))
+        return data.get("account_id", 0)
+    except Exception:
+        return 0
+
+
+def verify_token_account(token: str) -> None:
+    """Raise ValueError if token is not for the required account (77440 = mark)."""
+    acct = _get_account_id_from_token(token)
+    if acct and acct != REQUIRED_ACCOUNT_ID:
+        raise ValueError(
+            f"❌ Token account mismatch: got account_id={acct} "
+            f"(Trebello/shop.trybello.com), need {REQUIRED_ACCOUNT_ID} (mark/get.trybello.com). "
+            "Open the mark account in the browser and retry."
+        )
+    print(f"✅ Token verified — account_id={acct} (mark)")
+
+
 def save_token_locally(token: str) -> None:
     TOKEN_FILE.write_text(token)
     TOKEN_FILE.chmod(0o600)
@@ -349,6 +376,12 @@ def main():
         token = get_token_from_openclaw_browser()
     except Exception as e:
         print(f"❌ Token refresh failed: {e}")
+        sys.exit(1)
+
+    try:
+        verify_token_account(token)
+    except ValueError as e:
+        print(str(e))
         sys.exit(1)
 
     save_token_locally(token)
