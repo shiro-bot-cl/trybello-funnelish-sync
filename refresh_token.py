@@ -85,8 +85,14 @@ def get_token_from_openclaw_browser() -> str:
         if funnelish_pages:
             token = _get_token_via_raw_cdp()
             if token:
-                print("✅ Connected via CDP (raw websocket)")
-                return token
+                acct = _get_account_id_from_token(token)
+                if acct == REQUIRED_ACCOUNT_ID:
+                    print("✅ Connected via CDP (raw websocket)")
+                    return token
+                else:
+                    print(f"⚠️  CDP tab has wrong account (id={acct}, need {REQUIRED_ACCOUNT_ID}) — falling through to Playwright login")
+            else:
+                print("⚠️  CDP returned empty token — falling through to Playwright")
         else:
             print("⚠️  No Funnelish tab open in CDP browser")
     except Exception as e:
