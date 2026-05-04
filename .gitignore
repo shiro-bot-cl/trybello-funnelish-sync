@@ -5,3 +5,4 @@ __pycache__/
 output/
 csv_imports/
 .env
+.funnelish_trybello_token
