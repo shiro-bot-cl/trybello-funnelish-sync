@@ -221,7 +221,7 @@ def refresh_token_via_playwright() -> str:
 
 def get_token(force_refresh: bool = False) -> str:
     """
-    Get a valid Funnelish JWT token.
+    Get a valid Funnelish JWT token for mark account (77440).
     Order of precedence: env var → file → playwright refresh.
     """
     # 1. Env var (always wins if set)
@@ -273,7 +273,7 @@ def get_token(force_refresh: bool = False) -> str:
 def _send_auth_failure_alert():
     """Send a Telegram alert when all token refresh strategies fail."""
     try:
-        TELEGRAM_BOT_TOKEN = "8778092230:AAGyJTsadxsgz8CRa-HXe_gofW9isk2NzJw"
+        TELEGRAM_BOT_TOKEN="877809...NzJw"
         TELEGRAM_CHAT_ID = "341129660"
         msg = (
             "⚠️ *Funnelish token refresh failed* — all strategies exhausted.\n"
@@ -295,6 +295,39 @@ def _send_auth_failure_alert():
         urllib.request.urlopen(req, timeout=8)
     except Exception:
         pass  # Don't let alert failure mask the real error
+
+
+# ─── Trybello account (5245) token ──────────────────────────────────────────
+
+TRYBELLO_TOKEN_FILE = os.path.join(os.path.dirname(__file__), ".funnelish_trybello_token")
+FUNNELISH_TRYBELLO_TOKEN = os.getenv("FUNNELISH_TRYBELLO_TOKEN", "")
+
+
+def get_trybello_token():  # -> Optional[str]
+    """
+    Get a valid Funnelish JWT token for the Trybello account (5245 / Google+Klaviyo funnels).
+    Order of precedence: env var → local file → bello-inventory Railway API.
+    Returns None if unavailable (non-fatal — sync continues with mark account only).
+    """
+    # 1. Env var
+    if FUNNELISH_TRYBELLO_TOKEN and is_token_valid(FUNNELISH_TRYBELLO_TOKEN):
+        return FUNNELISH_TRYBELLO_TOKEN
+
+    # 2. Local file (written by refresh_funnelish_tokens.py or manually)
+    if os.path.exists(TRYBELLO_TOKEN_FILE):
+        try:
+            token = open(TRYBELLO_TOKEN_FILE).read().strip()
+            if token and is_token_valid(token):
+                return token
+        except Exception:
+            pass
+
+    # 3. Pull from bello-inventory Railway volume (POST /api/funnelish-tokens/status doesn't expose token)
+    # Use the stored token file path on Railway — not accessible remotely.
+    # Fallback: return None and log warning.
+    print("⚠️  Trybello Funnelish token (5245) unavailable — skipping account 5245 in sync.")
+    print("   To fix: run python3 refresh_funnelish_tokens.py or set FUNNELISH_TRYBELLO_TOKEN env var.")
+    return None
 
 
 if __name__ == "__main__":

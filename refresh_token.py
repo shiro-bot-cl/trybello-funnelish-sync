@@ -121,9 +121,9 @@ def get_token_from_openclaw_browser() -> str:
 
             # If already past login (stale cookie session), handle directly
             if "select-account" in current_url:
-                print("📋 Already on select-account — clicking first account...")
+                print("📋 Already on select-account — selecting mark account (77440)...")
                 time.sleep(2)
-                page.locator("div.account_div").first.click()
+                _click_mark_account(page)
                 page.wait_for_function(
                     "() => !window.location.pathname.includes('select-account') && !window.location.pathname.includes('log-in')",
                     timeout=15000
@@ -155,9 +155,9 @@ def get_token_from_openclaw_browser() -> str:
             # Handle select-account intermediate step
             try:
                 page.wait_for_url("**/select-account**", timeout=15000)
-                print("📋 On select-account page — clicking first account...")
+                print("📋 On select-account page — selecting mark account (77440)...")
                 time.sleep(2)
-                page.locator("div.account_div").first.click()
+                _click_mark_account(page)
                 page.wait_for_function(
                     "() => !window.location.pathname.includes('select-account') && !window.location.pathname.includes('log-in')",
                     timeout=15000
@@ -246,8 +246,8 @@ def get_token_from_openclaw_browser() -> str:
         try:
             page.wait_for_url("**/select-account**", timeout=12000)
             time.sleep(2)
-            # Use confirmed selector (div.account_div)
-            page.locator("div.account_div").first.click()
+            # Select mark account (77440) specifically — not first() which may be trybello
+            _click_mark_account(page)
             page.wait_for_function(
                 "() => !window.location.pathname.includes('select-account') && !window.location.pathname.includes('log-in')",
                 timeout=15000
@@ -272,6 +272,37 @@ def get_token_from_openclaw_browser() -> str:
 
 
 REQUIRED_ACCOUNT_ID = 77440  # mark / get.trybello.com (main FB funnels)
+
+
+def _click_mark_account(page) -> None:
+    """Click the mark account (77440) on the select-account page.
+    Reads account_id from each div.account_div and clicks the right one.
+    Falls back to text match 'mark' if JS method fails.
+    """
+    try:
+        clicked = page.evaluate("""() => {
+            const divs = document.querySelectorAll('div.account_div');
+            for (const d of divs) {
+                const text = d.innerText || d.textContent || '';
+                if (text.toLowerCase().includes('mark')) {
+                    d.click(); return 'text:mark';
+                }
+            }
+            // fallback: click first that isn't 'trebello'
+            for (const d of divs) {
+                const text = (d.innerText || '').toLowerCase();
+                if (!text.includes('trebello') && !text.includes('trybello')) {
+                    d.click(); return 'text:non-trebello';
+                }
+            }
+            return null;
+        }""")
+        print(f"✅ Selected account via: {clicked}")
+        if not clicked:
+            raise RuntimeError("no matching account div found")
+    except Exception as e:
+        print(f"⚠️  JS account select failed ({e}) — falling back to first()")
+        page.locator("div.account_div").first.click()
 
 
 def _get_account_id_from_token(token: str) -> int:

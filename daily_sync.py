@@ -218,8 +218,24 @@ def build_shopify_lookup(orders: List[Dict]) -> Dict[str, List[Dict]]:
 def fetch_funnelish_orders_api(date_from: datetime, date_to: datetime) -> List[Dict]:
     """Fetch Funnelish orders for the given date range via API.
     Uses EST (UTC-5) boundaries since Funnelish account is in EST.
+    Fetches from BOTH accounts: mark (77440) + Trybello (5245).
     """
-    token = get_token()
+    mark_orders = _fetch_funnelish_orders_for_token(get_token(), date_from, date_to, account_label="mark(77440)")
+    from funnelish_auth import get_trybello_token
+    trybello_token = get_trybello_token()
+    if trybello_token:
+        trybello_orders = _fetch_funnelish_orders_for_token(trybello_token, date_from, date_to, account_label="trybello(5245)")
+        # Dedupe by reference field (same customer, same order can appear in both if webhook misconfigured)
+        seen_refs = {o.get("reference") for o in mark_orders if o.get("reference")}
+        new_orders = [o for o in trybello_orders if o.get("reference") not in seen_refs]
+        print(f"  ✅ mark(77440): {len(mark_orders)} orders | trybello(5245): {len(trybello_orders)} orders ({len(new_orders)} unique new)")
+        return mark_orders + new_orders
+    else:
+        print(f"  ✅ mark(77440): {len(mark_orders)} orders | trybello(5245): skipped (token unavailable)")
+        return mark_orders
+
+
+def _fetch_funnelish_orders_for_token(token: str, date_from: datetime, date_to: datetime, account_label: str = "") -> List[Dict]:
     from datetime import timezone as _tz
     EST = _tz(timedelta(hours=-5), name="EST")
     # Mar 13 00:00 EST → Mar 13 05:00 UTC
@@ -244,6 +260,9 @@ def fetch_funnelish_orders_api(date_from: datetime, date_to: datetime) -> List[D
                 data = json.loads(resp.read())
         except urllib.error.HTTPError as e:
             if e.code == 401:
+                if account_label.startswith("trybello"):
+                    print(f"⚠️  Trybello(5245) token expired mid-fetch — stopping 5245 fetch.")
+                    break
                 print("⚠️  Token expired. Refreshing...")
                 token = get_token(force_refresh=True)
                 continue
@@ -252,13 +271,19 @@ def fetch_funnelish_orders_api(date_from: datetime, date_to: datetime) -> List[D
         batch = data.get("orders", [])
         orders.extend(batch)
         total = data.get("meta", {}).get("count", 0)
-        print(f"  Fetched {len(orders)}/{total} Funnelish orders...", end="\r")
+        label = f" [{account_label}]" if account_label else ""
+        print(f"  Fetched {len(orders)}/{total} Funnelish orders{label}...", end="\r")
 
         if len(orders) >= total or len(batch) < limit:
             break
         skip += limit
 
-    print(f"  ✅ Total Funnelish orders: {len(orders)}")
+    label = f" [{account_label}]" if account_label else ""
+    print(f"  ✅ Total Funnelish orders{label}: {len(orders)}")
+    # Tag each order with its source account for address enrichment
+    account_tag = "trybello" if account_label.startswith("trybello") else "mark"
+    for o in orders:
+        o.setdefault("funnelish_account", account_tag)
     return orders
 
 
@@ -746,8 +771,18 @@ def main():
 
     # ── Step 6: Enrich with shipping addresses ─────────────────────
     print("\n📦 Fetching shipping addresses from Funnelish...")
-    funnelish_token = get_token()
-    enrich_with_addresses(all_missing, funnelish_token)
+    from funnelish_auth import get_trybello_token
+    mark_token = get_token()
+    trybello_token_for_enrich = get_trybello_token()
+    # Split by source account and enrich with correct token
+    mark_missing     = [o for o in all_missing if o.get("funnelish_account", "mark") == "mark"]
+    trybello_missing = [o for o in all_missing if o.get("funnelish_account") == "trybello"]
+    if mark_missing:
+        enrich_with_addresses(mark_missing, mark_token)
+    if trybello_missing and trybello_token_for_enrich:
+        enrich_with_addresses(trybello_missing, trybello_token_for_enrich)
+    elif trybello_missing:
+        enrich_with_addresses(trybello_missing, mark_token)  # fallback — may not find addresses
 
     # ── Step 7: Save CSV ───────────────────────────────────────────
     print("\n💾 Saving CSV...")
