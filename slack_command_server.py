@@ -41,6 +41,15 @@ SLACK_CHANNEL = os.getenv("SLACK_CHANNEL", "#trybello-cs-alert")
 TOKEN_UPDATE_SECRET = os.getenv("TOKEN_UPDATE_SECRET", "")
 MUBASHIR_ID = "U0ABB3AV2E8"
 
+# ShipBob webhook config
+SHIPBOB_TRACKING_SCRIPT = os.getenv(
+    "SHIPBOB_TRACKING_SCRIPT",
+    "https://script.google.com/macros/s/AKfycbx1RMDN_LriN56ygyaGnMHHi5iCz2juG-cqZbIrL3rn9Np7N_aNGJqFAXWIn5uTdcX7/exec"
+)
+SHIPBOB_SHEET_URL = "https://docs.google.com/spreadsheets/d/12g3PLio-D9z6hB8rE-bxI58hBEF14BlWS9de5PDID3w/edit"
+CS_SLACK_CHANNEL = "#trybello-cs-alerts"
+WORKING_DAYS_THRESHOLD = 7
+
 # In-memory Funnelish token
 _funnelish_token: str = os.getenv("FUNNELISH_TOKEN", "")
 
@@ -372,6 +381,166 @@ def run_preview(date_str: str, response_url: str, user_name: str) -> None:
     post_to_slack(fallback_text, blocks=blocks)
 
 
+# ─── ShipBob Webhook Handlers ───────────────────────────────────────────────────
+
+def _working_days_since(date_str: str) -> int:
+    """Count working days (Mon-Fri) from date_str to today."""
+    try:
+        from datetime import date as date_cls
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        start = dt.date()
+        today = date_cls.today()
+        days = 0
+        current = start
+        while current < today:
+            if current.weekday() < 5:
+                days += 1
+            current += timedelta(days=1)
+        return days
+    except Exception:
+        return -1
+
+
+def _post_to_tracking_sheet(action: str, data: dict) -> bool:
+    """POST tracking data to Apps Script Google Sheet handler."""
+    try:
+        payload = json.dumps({"action": action, **data}).encode()
+        req = urllib.request.Request(
+            SHIPBOB_TRACKING_SCRIPT,
+            data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "ShiroBot/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read())
+            return result.get("status") == "ok"
+    except Exception as e:
+        print(f"  ⚠️  Sheet tracking POST failed: {e}")
+        return False
+
+
+def handle_shipbob_webhook(body: bytes) -> None:
+    """Process a ShipBob webhook event."""
+    try:
+        event = json.loads(body)
+        webhook_type = event.get("webhook_type", "")
+        occurred_at = event.get("occurred_at", "")
+        data = event.get("data", {})
+
+        print(f"  📩 ShipBob webhook: {webhook_type} at {occurred_at}")
+
+        if webhook_type == "shipment_labelcreated":
+            # Record in tracking sheet: order stuck waiting for carrier pickup
+            order_id = str(data.get("order_id", ""))
+            shipment_id = str(data.get("id", ""))
+            tracking_number = data.get("tracking_number", "")
+            carrier = data.get("carrier", "")
+            # Fetch order details for customer info
+            _post_to_tracking_sheet("track_label_created", {
+                "order_id": order_id,
+                "shipment_id": shipment_id,
+                "tracking_number": tracking_number,
+                "carrier": carrier,
+                "label_created_at": occurred_at,
+            })
+            print(f"  ✅ Tracked label_created for order {order_id}")
+
+        elif webhook_type == "order_shipped":
+            # Remove from stuck tracking — order moved past LabelCreated
+            order_id = str(data.get("id", ""))
+            _post_to_tracking_sheet("mark_shipped", {
+                "order_id": order_id,
+                "shipped_at": occurred_at,
+            })
+            print(f"  ✅ Marked shipped for order {order_id}")
+
+    except Exception as e:
+        print(f"  ❌ ShipBob webhook processing error: {e}")
+
+
+def run_shipbob_daily_report() -> None:
+    """Read tracking sheet, find stuck orders, write report tabs, send Slack."""
+    print("📊 Running ShipBob daily stuck orders report...")
+    try:
+        # Fetch tracking data from sheet
+        payload = json.dumps({"action": "get_tracking"}).encode()
+        req = urllib.request.Request(
+            SHIPBOB_TRACKING_SCRIPT,
+            data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "ShiroBot/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read())
+
+        tracking_rows = result.get("rows", [])
+        print(f"  Tracking rows fetched: {len(tracking_rows)}")
+
+        # Filter: stuck >= threshold working days and not yet shipped
+        stuck_labeled = []
+        for row in tracking_rows:
+            if row.get("shipped_at"):
+                continue  # Already shipped — skip
+            label_created_at = row.get("label_created_at", "")
+            wd = _working_days_since(label_created_at)
+            if wd >= WORKING_DAYS_THRESHOLD:
+                stuck_labeled.append({
+                    "order_id": row.get("order_id", ""),
+                    "shipment_id": row.get("shipment_id", ""),
+                    "tracking_number": row.get("tracking_number", ""),
+                    "carrier": row.get("carrier", ""),
+                    "label_created_at": label_created_at,
+                    "working_days": wd,
+                    "link": f"https://web.shipbob.com/app/merchant/#/Order/{row.get('order_id','')}",
+                })
+
+        # Sort by working days (most urgent first)
+        stuck_labeled.sort(key=lambda r: r["working_days"], reverse=True)
+        print(f"  Stuck ≥{WORKING_DAYS_THRESHOLD} working days: {len(stuck_labeled)}")
+
+        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+        # Write report to Google Sheet Labeled tab
+        sheet_rows = [
+            [r["order_id"], r["shipment_id"], r["tracking_number"],
+             r["carrier"], r["label_created_at"][:10], r["working_days"], r["link"]]
+            for r in stuck_labeled
+        ]
+        _post_to_tracking_sheet("write_report", {
+            "tab": "Labeled",
+            "rows": sheet_rows,
+            "headers": ["Order ID", "Shipment ID", "Tracking #", "Carrier",
+                       "Label Created", "Working Days Stuck", "ShipBob Link"],
+            "lastUpdated": now_str,
+        })
+
+        # Send Slack alert
+        total = len(stuck_labeled)
+        if total == 0:
+            msg_text = "✅ *ShipBob CS Check* — No stuck orders. All clear."
+            blocks = None
+        else:
+            msg_text = f"⚠️ *ShipBob Stuck Orders* — {total} order(s) stuck ≥{WORKING_DAYS_THRESHOLD} working days"
+            top5 = stuck_labeled[:5]
+            order_lines = "\n".join(
+                f"• Order `{r['order_id']}` — {r['working_days']} working days | {r['carrier']} | `{r['tracking_number'] or 'no tracking'}`"
+                for r in top5
+            )
+            if total > 5:
+                order_lines += f"\n_...and {total - 5} more. See sheet for full list._"
+            blocks = [
+                {"type": "header", "text": {"type": "plain_text", "text": f"⚠️ ShipBob Stuck Orders — {now_str[:10]}"}},
+                {"type": "section", "text": {"type": "mrkdwn", "text": f"*{total} order(s)* stuck in Label Created status for ≥{WORKING_DAYS_THRESHOLD} working days:\n\n{order_lines}"}},
+                {"type": "section", "text": {"type": "mrkdwn", "text": f"📊 <{SHIPBOB_SHEET_URL}|View Full Report in Google Sheets>"}},
+                {"type": "context", "elements": [{"type": "mrkdwn", "text": f"Updated: {now_str}"}]},
+            ]
+
+        post_to_slack(msg_text, channel=CS_SLACK_CHANNEL, blocks=blocks)
+        print(f"  ✅ Slack alert sent to {CS_SLACK_CHANNEL}")
+
+    except Exception as e:
+        print(f"  ❌ Daily report error: {e}")
+        post_to_slack(f"❌ ShipBob daily report failed: {e}", channel=CS_SLACK_CHANNEL)
+
+
 # ─── HTTP Handler ───────────────────────────────────────────────────────────────
 
 class SlackCommandHandler(BaseHTTPRequestHandler):
@@ -384,6 +553,19 @@ class SlackCommandHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
+        elif self.path == "/shipbob-daily-report":
+            # Protected endpoint: trigger daily stuck-orders report
+            auth = self.headers.get("Authorization", "")
+            if not TOKEN_UPDATE_SECRET or auth != f"Bearer {TOKEN_UPDATE_SECRET}":
+                self.send_response(401)
+                self.end_headers()
+                self.wfile.write(b"Unauthorized")
+                return
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ShipBob daily report triggered - check Slack")
+            t = threading.Thread(target=run_shipbob_daily_report, daemon=True)
+            t.start()
         elif self.path.startswith("/debug-preview"):
             # Protected test endpoint: trigger preview flow without Slack signing
             from urllib.parse import urlparse, parse_qs
@@ -485,6 +667,16 @@ class SlackCommandHandler(BaseHTTPRequestHandler):
 
         if self.path == "/set-token":
             self._handle_set_token(body)
+            return
+
+        if self.path == "/shipbob-webhook":
+            # ShipBob webhook — no Slack signature, respond 200 immediately then process
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+            t = threading.Thread(target=handle_shipbob_webhook, args=(body,), daemon=True)
+            t.start()
             return
 
         # Verify Slack signature for all other endpoints
